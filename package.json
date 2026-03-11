@@ -1,0 +1,39 @@
+{
+  "name": "clawpal-connect",
+  "version": "0.2.0",
+  "description": "Hosted-relay host connector CLI for ClawPal",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "clawpal-connect": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts demo",
+    "status": "tsx src/cli.ts status",
+    "bind": "tsx src/cli.ts bind",
+    "start:dev": "tsx src/cli.ts start --transport mock",
+    "demo": "tsx src/cli.ts demo",
+    "start": "node dist/cli.js start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run build && npm run test"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.8"
+  }
+}
