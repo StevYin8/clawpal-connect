@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { Command, InvalidArgumentError } from "commander";
 
-import type { ConnectorEvent } from "./backend_client.js";
+import { syncAgentsToRelay } from "./agent_sync.js";
+import type { BackendConnectionContext, ConnectorEvent } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { ConnectorRuntime } from "./connector_runtime.js";
 import { describeGatewayStatus, GatewayDetector } from "./gateway_detector.js";
@@ -9,6 +10,7 @@ import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry } from "./host_registry.js";
 import { createMockForwardedRequest, MockBackendTransport } from "./mock_backend_transport.js";
 import { RuntimeWorker } from "./runtime_worker.js";
+import { WsBackendTransport } from "./ws_backend_transport.js";
 import { startLocalWebUi, type ConnectorDiagnosticsSnapshot } from "./web/local_web_ui.js";
 
 interface RegistryCliOptions {
@@ -32,6 +34,7 @@ interface BindCliOptions extends RegistryCliOptions {
 
 interface StartCliOptions extends GatewayCliOptions {
   transport: string;
+  backendUrl: string;
   heartbeatMs: number;
   webUi: boolean;
   webHost: string;
@@ -87,6 +90,7 @@ function withGatewayOptions(command: Command): Command {
 function withLifecycleOptions(command: Command): Command {
   return withGatewayOptions(command)
     .option("--transport <name>", "Backend transport adapter", parseTransport, "mock")
+    .option("--backend-url <url>", "Official backend base URL", "http://127.0.0.1:3000")
     .option("--heartbeat-ms <ms>", "Heartbeat interval in milliseconds", parsePositiveInt, 30_000)
     .option("--web-ui", "Enable local diagnostics web UI", false)
     .option("--web-host <host>", "Local diagnostics web host", "127.0.0.1")
@@ -233,6 +237,69 @@ function createRuntimeForMockLifecycle(
   return { transport, runtime, registry };
 }
 
+async function createRuntimeForWsLifecycle(
+  options: StartCliOptions
+): Promise<{
+  transport: WsBackendTransport;
+  runtime: ConnectorRuntime;
+}> {
+  if (!options.backendUrl) {
+    throw new Error("--backend-url is required when using --transport ws");
+  }
+
+  const transport = new WsBackendTransport();
+  const registry = buildHostRegistry(options);
+  const gatewayDetector = buildGatewayDetector(options);
+
+  // Get active host from registry or create default
+  let activeHost = await registry.getActiveHost();
+  if (!activeHost) {
+    // Auto-bind a default host for demo purposes
+    await registry.bindHost({
+      hostId: "local-host",
+      hostName: "Local Host",
+      userId: "demo-user",
+      backendUrl: options.backendUrl
+    });
+    activeHost = await registry.getActiveHost();
+  }
+
+  if (!activeHost) {
+    throw new Error("Failed to get or create active host");
+  }
+
+  const backendClient = new BackendClient({ transport });
+
+  // Connect to backend
+  const connectContext: BackendConnectionContext = {
+    backendUrl: options.backendUrl,
+    hostId: activeHost.hostId,
+    userId: activeHost.userId
+  };
+  if (process.env.CLAWPAL_CONNECTOR_TOKEN) {
+    connectContext.connectorToken = process.env.CLAWPAL_CONNECTOR_TOKEN;
+  }
+  await transport.connect(connectContext);
+
+  // Sync agents from OpenClaw config to relay
+  const agentSyncResult = await syncAgentsToRelay({
+    backendUrl: options.backendUrl,
+    hostId: activeHost.hostId
+  });
+  if (agentSyncResult.synced > 0) {
+    console.log(`[connector] Synced ${agentSyncResult.synced} agents from OpenClaw config to relay`);
+  }
+
+  const runtime = new ConnectorRuntime({
+    hostRegistry: registry,
+    gatewayDetector,
+    backendClient,
+    heartbeatManager: new HeartbeatManager({ intervalMs: options.heartbeatMs })
+  });
+
+  return { transport, runtime };
+}
+
 async function waitForShutdown(durationMs?: number): Promise<void> {
   if (durationMs) {
     await new Promise<void>((resolve) => {
@@ -296,7 +363,18 @@ async function runBindCommand(options: BindCliOptions): Promise<void> {
 }
 
 async function runStartCommand(options: StartCliOptions): Promise<void> {
-  const { transport, runtime } = createRuntimeForMockLifecycle(options);
+  let transport;
+  let runtime;
+
+  if (options.transport === "ws") {
+    const result = await createRuntimeForWsLifecycle(options);
+    transport = result.transport;
+    runtime = result.runtime;
+  } else {
+    const result = createRuntimeForMockLifecycle(options);
+    transport = result.transport;
+    runtime = result.runtime;
+  }
 
   const statusSnapshot = await runtime.createStatusSnapshot();
   printStatusSnapshot(statusSnapshot, buildHostRegistry(options).getStoreFilePath());
