@@ -42,10 +42,19 @@ const OPENCLAW_CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
 export async function readOpenClawConfig(): Promise<OpenClawConfig | null> {
   try {
     const content = await readFile(OPENCLAW_CONFIG_PATH, "utf-8");
-    return JSON.parse(content) as OpenClawConfig;
+    return parseOpenClawConfig(content);
   } catch {
     return null;
   }
+}
+
+function parseOpenClawConfig(content: string): OpenClawConfig {
+  const normalized = content
+    .replace(/^\uFEFF/, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/,\s*([}\]])/g, "$1");
+
+  return JSON.parse(normalized) as OpenClawConfig;
 }
 
 export async function writeOpenClawConfig(config: OpenClawConfig): Promise<void> {
