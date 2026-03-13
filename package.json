@@ -28,10 +28,12 @@
     "check": "npm run build && npm run test"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vitest": "^2.1.8"
