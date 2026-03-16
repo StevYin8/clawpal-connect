@@ -7,6 +7,7 @@ import { syncAgentsToRelay } from "./agent_sync.js";
 import type { ConnectorEvent } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { ConnectorRuntime } from "./connector_runtime.js";
+import { extractLocalGatewayDefaults, readOpenClawConfig } from "./openclaw_config.js";
 import { describeGatewayStatus, GatewayDetector } from "./gateway_detector.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry } from "./host_registry.js";
@@ -212,10 +213,30 @@ function buildRuntimeConfigStore(options: RuntimeConfigCliOptions): RuntimeConfi
   return new RuntimeConfigStore(runtimeConfigFile ? { filePath: runtimeConfigFile } : {});
 }
 
-function buildGatewayDetector(options: GatewayCliOptions): GatewayDetector {
+async function resolveLocalGatewayDefaults(): Promise<{
+  gatewayUrl?: string;
+  gatewayToken?: string;
+}> {
+  const config = await readOpenClawConfig();
+  if (!config) {
+    return {};
+  }
+  return extractLocalGatewayDefaults(config);
+}
+
+async function buildGatewayDetector(options: GatewayCliOptions): Promise<GatewayDetector> {
+  const localDefaults = await resolveLocalGatewayDefaults();
   return new GatewayDetector({
-    baseUrl: options.gateway,
-    token: options.token,
+    baseUrl:
+      normalizeOptional(options.gateway) ??
+      normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+      localDefaults.gatewayUrl ??
+      DEFAULT_RUNTIME_GATEWAY_URL,
+    token:
+      normalizeOptional(options.token) ??
+      normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+      localDefaults.gatewayToken ??
+      "",
     timeoutMs: options.timeoutMs
   });
 }
@@ -316,7 +337,11 @@ function createRuntimeForMockLifecycle(
 
   const transport = new MockBackendTransport();
   const registry = buildHostRegistry(options);
-  const gatewayDetector = buildGatewayDetector(options);
+  const gatewayDetector = new GatewayDetector({
+    baseUrl: options.gateway,
+    token: options.token,
+    timeoutMs: options.timeoutMs,
+  });
   const backendClient = new BackendClient({ transport });
   const runtimeWorker = overrides.forceGatewayOnline
     ? new RuntimeWorker({
@@ -378,7 +403,7 @@ async function createRuntimeForWsLifecycle(
 
   const transport = new WsBackendTransport();
   const registry = buildHostRegistry(options);
-  const gatewayDetector = buildGatewayDetector(options);
+  const gatewayDetector = await buildGatewayDetector(options);
 
   let activeHost = await registry.getActiveHost();
   if (!activeHost && overrides.autoBindDefaultHost) {
@@ -553,15 +578,18 @@ async function persistPairingResolution(options: {
     bindingCode: options.resolved.binding.bindingCode
   });
 
+  const localDefaults = await resolveLocalGatewayDefaults();
   const gatewayUrl =
     normalizeOptional(options.gateway) ??
     normalizeOptional(options.resolved.runtimeConfig.gatewayUrl) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    localDefaults.gatewayUrl ??
     DEFAULT_RUNTIME_GATEWAY_URL;
   const gatewayToken =
     normalizeOptional(options.token) ??
     normalizeOptional(options.resolved.runtimeConfig.gatewayToken) ??
-    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN);
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+    localDefaults.gatewayToken;
   const runtimeUpdate: RuntimeConfigUpdate = {
     transport: "ws",
     gatewayUrl,
@@ -586,7 +614,7 @@ async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
   const transport = new MockBackendTransport();
   const runtime = new ConnectorRuntime({
     hostRegistry: buildHostRegistry(options),
-    gatewayDetector: buildGatewayDetector(options),
+    gatewayDetector: await buildGatewayDetector(options),
     backendClient: new BackendClient({ transport })
   });
 
@@ -715,13 +743,16 @@ async function runRunCommand(options: RunCliOptions): Promise<void> {
   }
 
   const runtimeConfig = await runtimeConfigStore.loadConfig();
+  const localDefaults = await resolveLocalGatewayDefaults();
   const gateway =
     normalizeOptional(options.gateway) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    localDefaults.gatewayUrl ??
     runtimeConfig.gatewayUrl;
   const token =
     normalizeOptional(options.token) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+    localDefaults.gatewayToken ??
     runtimeConfig.gatewayToken ??
     "";
   const wsLifecycleOptions: WsLifecycleOptions = {
