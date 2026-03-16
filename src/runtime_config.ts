@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 
 import { DEFAULT_GATEWAY_TIMEOUT_MS } from "./gateway_detector.js";
 
-export const DEFAULT_RUNTIME_GATEWAY_URL = "http://127.0.0.1:3456";
+export const DEFAULT_RUNTIME_GATEWAY_URL = "http://127.0.0.1:18789";
 export const DEFAULT_RUNTIME_HEARTBEAT_MS = 30_000;
 
 export interface ConnectorRuntimeConfig {

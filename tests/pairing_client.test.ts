@@ -22,14 +22,17 @@ describe("pairing_session client", () => {
       });
 
       return jsonResponse(200, {
-        sessionId: "session-1",
-        code: "abc123",
+        pairing: {
+          pairingSessionId: "session-1",
+          code: "abc123",
+        },
         pollAfterMs: 1200
       });
     };
 
     const session = await startPairingSession({
       backendUrl: "https://relay.example",
+      hostId: "dev-mac",
       hostName: "Dev Mac",
       fetchImpl
     });
@@ -38,6 +41,7 @@ describe("pairing_session client", () => {
       sessionId: "session-1",
       code: "ABC123",
       backendUrl: "https://relay.example/",
+      hostId: "dev-mac",
       hostName: "Dev Mac",
       createEndpoint: "https://relay.example/connector/pair/session",
       statusEndpoint: "https://relay.example/connector/pair/session/session-1",
@@ -47,7 +51,7 @@ describe("pairing_session client", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("https://relay.example/connector/pair/session");
     expect(calls[0]?.init?.method).toBe("POST");
-    expect(calls[0]?.init?.body).toBe(JSON.stringify({ connector: { hostName: "Dev Mac" } }));
+    expect(calls[0]?.init?.body).toBe(JSON.stringify({ hostId: "dev-mac", hostName: "Dev Mac", connector: { hostId: "dev-mac", hostName: "Dev Mac" } }));
   });
 
   test("waitForPairingCompletion polls until binding payload is ready", async () => {
@@ -55,6 +59,7 @@ describe("pairing_session client", () => {
       sessionId: "session-2",
       code: "ZXCV12",
       backendUrl: "https://relay.example/",
+      hostId: "workstation",
       hostName: "Workstation",
       createEndpoint: "https://relay.example/connector/pair/session",
       statusEndpoint: "https://relay.example/connector/pair/session/session-2",
@@ -119,6 +124,7 @@ describe("pairing_session client", () => {
       sessionId: "session-3",
       code: "QWERT1",
       backendUrl: "https://relay.example/",
+      hostId: "laptop",
       hostName: "Laptop",
       createEndpoint: "https://relay.example/connector/pair/session",
       statusEndpoint: "https://relay.example/connector/pair/session/session-3",

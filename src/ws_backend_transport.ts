@@ -17,6 +17,28 @@ interface EventWaiter {
   timeout: NodeJS.Timeout;
 }
 
+export function resolveRelayWsBaseUrl(backendUrl: string): string {
+  const normalized = backendUrl.trim();
+  if (!normalized) {
+    throw new Error("backendUrl cannot be empty.");
+  }
+
+  const parsed = new URL(/^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`);
+  const isSecure = parsed.protocol === "https:" || parsed.protocol === "wss:";
+  const wsProtocol = isSecure ? "wss:" : "ws:";
+
+  // ClawPal relay uses 3001 for HTTP API and 8788 for WS transport.
+  if (parsed.port === "3001") {
+    parsed.port = "8788";
+  }
+
+  parsed.protocol = wsProtocol;
+  parsed.pathname = "";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString().replace(/\/$/, "");
+}
+
 /**
  * WebSocket-based backend transport for connecting to ClawPal relay server.
  */
@@ -40,7 +62,7 @@ export class WsBackendTransport implements BackendTransport {
 
   async connect(context: BackendConnectionContext): Promise<void> {
     this.context = context;
-    const wsUrl = `${context.backendUrl.replace(/^http/, "ws")}/ws/connector?hostId=${encodeURIComponent(context.hostId)}&userId=${encodeURIComponent(context.userId)}`;
+    const wsUrl = `${resolveRelayWsBaseUrl(context.backendUrl)}/ws/connector?hostId=${encodeURIComponent(context.hostId)}&userId=${encodeURIComponent(context.userId)}`;
 
     return new Promise((resolve, reject) => {
       try {

@@ -7,6 +7,7 @@ import { syncAgentsToRelay } from "./agent_sync.js";
 import type { ConnectorEvent } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { ConnectorRuntime } from "./connector_runtime.js";
+import { extractLocalGatewayDefaults, readOpenClawConfig } from "./openclaw_config.js";
 import { describeGatewayStatus, GatewayDetector } from "./gateway_detector.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry } from "./host_registry.js";
@@ -98,7 +99,7 @@ interface DiagnosticsTransport {
   getSentEvents(): ConnectorEvent[];
 }
 
-const DEFAULT_BACKEND_URL = "https://relay.clawpal.example";
+const DEFAULT_BACKEND_URL = "http://120.55.96.42:3001";
 
 function parsePositiveInt(value: string): number {
   const parsed = Number.parseInt(value, 10);
@@ -202,6 +203,20 @@ function resolveBackendUrl(value?: string): string {
   );
 }
 
+function deriveConnectorHostId(): string {
+  const explicit = normalizeOptional(process.env.CLAWPAL_HOST_ID);
+  if (explicit) {
+    return explicit;
+  }
+
+  const raw = hostname().trim().toLowerCase();
+  const normalized = raw
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63);
+  return normalized || "clawpal-host";
+}
+
 function buildHostRegistry(options: RegistryCliOptions): HostRegistry {
   const registryFile = normalizePath(options.registryFile);
   return new HostRegistry(registryFile ? { filePath: registryFile } : {});
@@ -212,10 +227,30 @@ function buildRuntimeConfigStore(options: RuntimeConfigCliOptions): RuntimeConfi
   return new RuntimeConfigStore(runtimeConfigFile ? { filePath: runtimeConfigFile } : {});
 }
 
-function buildGatewayDetector(options: GatewayCliOptions): GatewayDetector {
+async function resolveLocalGatewayDefaults(): Promise<{
+  gatewayUrl?: string;
+  gatewayToken?: string;
+}> {
+  const config = await readOpenClawConfig();
+  if (!config) {
+    return {};
+  }
+  return extractLocalGatewayDefaults(config);
+}
+
+async function buildGatewayDetector(options: GatewayCliOptions): Promise<GatewayDetector> {
+  const localDefaults = await resolveLocalGatewayDefaults();
   return new GatewayDetector({
-    baseUrl: options.gateway,
-    token: options.token,
+    baseUrl:
+      normalizeOptional(options.gateway) ??
+      normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+      localDefaults.gatewayUrl ??
+      DEFAULT_RUNTIME_GATEWAY_URL,
+    token:
+      normalizeOptional(options.token) ??
+      normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+      localDefaults.gatewayToken ??
+      "",
     timeoutMs: options.timeoutMs
   });
 }
@@ -316,7 +351,11 @@ function createRuntimeForMockLifecycle(
 
   const transport = new MockBackendTransport();
   const registry = buildHostRegistry(options);
-  const gatewayDetector = buildGatewayDetector(options);
+  const gatewayDetector = new GatewayDetector({
+    baseUrl: options.gateway,
+    token: options.token,
+    timeoutMs: options.timeoutMs,
+  });
   const backendClient = new BackendClient({ transport });
   const runtimeWorker = overrides.forceGatewayOnline
     ? new RuntimeWorker({
@@ -378,7 +417,7 @@ async function createRuntimeForWsLifecycle(
 
   const transport = new WsBackendTransport();
   const registry = buildHostRegistry(options);
-  const gatewayDetector = buildGatewayDetector(options);
+  const gatewayDetector = await buildGatewayDetector(options);
 
   let activeHost = await registry.getActiveHost();
   if (!activeHost && overrides.autoBindDefaultHost) {
@@ -499,6 +538,7 @@ async function runLifecycleLoop(options: {
 
 async function requestAndWaitForPairing(options: {
   backendUrl: string;
+  hostId: string;
   hostName: string;
   reason: "no_binding" | "manual";
 }) {
@@ -510,6 +550,7 @@ async function requestAndWaitForPairing(options: {
 
   const session = await startPairingSession({
     backendUrl: options.backendUrl,
+    hostId: options.hostId,
     hostName: options.hostName
   });
 
@@ -553,15 +594,18 @@ async function persistPairingResolution(options: {
     bindingCode: options.resolved.binding.bindingCode
   });
 
+  const localDefaults = await resolveLocalGatewayDefaults();
   const gatewayUrl =
     normalizeOptional(options.gateway) ??
     normalizeOptional(options.resolved.runtimeConfig.gatewayUrl) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    localDefaults.gatewayUrl ??
     DEFAULT_RUNTIME_GATEWAY_URL;
   const gatewayToken =
     normalizeOptional(options.token) ??
     normalizeOptional(options.resolved.runtimeConfig.gatewayToken) ??
-    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN);
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+    localDefaults.gatewayToken;
   const runtimeUpdate: RuntimeConfigUpdate = {
     transport: "ws",
     gatewayUrl,
@@ -586,7 +630,7 @@ async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
   const transport = new MockBackendTransport();
   const runtime = new ConnectorRuntime({
     hostRegistry: buildHostRegistry(options),
-    gatewayDetector: buildGatewayDetector(options),
+    gatewayDetector: await buildGatewayDetector(options),
     backendClient: new BackendClient({ transport })
   });
 
@@ -603,9 +647,11 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
   const runtimeConfigStore = buildRuntimeConfigStore(options);
   const backendUrl = resolveBackendUrl(options.backendUrl);
   const hostName = normalizeOptional(options.hostName) ?? hostname();
+  const hostId = deriveConnectorHostId();
 
   const pairing = await requestAndWaitForPairing({
     backendUrl,
+    hostId,
     hostName,
     reason: "manual"
   });
@@ -620,7 +666,7 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
     heartbeatMs: options.heartbeatMs,
   });
 
-  console.log("status=Binding completed.");
+  console.log("status=Binding completed. Continuing connector startup...");
   console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
   console.log(`user id=${activeHost.userId}`);
   console.log(`backend url=${activeHost.backendUrl}`);
@@ -629,7 +675,20 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
   console.log(`registry file=${registry.getStoreFilePath()}`);
   console.log(`runtime config=${runtimeConfigStore.getStoreFilePath()}`);
   console.log(`run defaults=transport=${runtimeConfig.transport}, gateway=${runtimeConfig.gatewayUrl}`);
-  console.log("next=Run `clawpal-connect run` to start connector lifecycle.");
+  console.log("");
+
+  await runRunCommand({
+    registryFile: options.registryFile,
+    runtimeConfigFile: options.runtimeConfigFile,
+    backendUrl,
+    ...(options.gateway ? { gateway: options.gateway } : {}),
+    ...(options.token ? { token: options.token } : {}),
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
+    webUi: false,
+    webHost: "127.0.0.1",
+    webPort: 8787,
+  });
 }
 
 async function runBindCommand(options: BindCliOptions): Promise<void> {
@@ -687,41 +746,22 @@ async function runRunCommand(options: RunCliOptions): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
 
-  let activeHost = await registry.getActiveHost();
+  const activeHost = await registry.getActiveHost();
   if (!activeHost) {
-    const hostName = normalizeOptional(process.env.CLAWPAL_HOST_NAME) ?? hostname();
-    const pairing = await requestAndWaitForPairing({
-      backendUrl: resolveBackendUrl(options.backendUrl),
-      hostName,
-      reason: "no_binding"
-    });
-
-    const persisted = await persistPairingResolution({
-      registry,
-      runtimeConfigStore,
-      resolved: pairing.resolved,
-      gateway: options.gateway,
-      token: options.token,
-      timeoutMs: options.timeoutMs,
-      heartbeatMs: options.heartbeatMs,
-    });
-    activeHost = persisted.activeHost;
-
-    console.log("status=Binding completed. Continuing connector startup...");
-    console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
-    console.log(`pair create endpoint=${pairing.session.createEndpoint}`);
-    console.log(`pair status endpoint=${pairing.resolved.endpoint}`);
-    console.log("");
+    throw new Error("No active host binding found. Run `clawpal-connect pair` first.");
   }
 
   const runtimeConfig = await runtimeConfigStore.loadConfig();
+  const localDefaults = await resolveLocalGatewayDefaults();
   const gateway =
     normalizeOptional(options.gateway) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    localDefaults.gatewayUrl ??
     runtimeConfig.gatewayUrl;
   const token =
     normalizeOptional(options.token) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+    localDefaults.gatewayToken ??
     runtimeConfig.gatewayToken ??
     "";
   const wsLifecycleOptions: WsLifecycleOptions = {
@@ -837,7 +877,7 @@ withRegistryOption(program.command("bind").description("Bind local connector hos
   .requiredOption(
     "--backend-url <url>",
     "Official backend base URL",
-    process.env.CLAWPAL_BACKEND_URL ?? "https://relay.clawpal.example"
+    process.env.CLAWPAL_BACKEND_URL ?? DEFAULT_BACKEND_URL
   )
   .option("--connector-token <token>", "Connector token placeholder", process.env.CLAWPAL_CONNECTOR_TOKEN ?? "")
   .option("--binding-code <code>", "Bind code placeholder", process.env.CLAWPAL_BIND_CODE ?? "")
@@ -863,7 +903,7 @@ withLifecycleOptions(
   .option(
     "--bind-backend-url <url>",
     "Backend URL used by demo auto-bind",
-    "https://relay.clawpal.example"
+    DEFAULT_BACKEND_URL
   )
   .action(async (options: DemoCliOptions) => {
     await runDemoCommand(options);

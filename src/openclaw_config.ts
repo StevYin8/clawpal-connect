@@ -12,6 +12,12 @@ export interface OpenClawBinding {
 
 export interface OpenClawConfig {
   bindings: OpenClawBinding[];
+  gateway?: {
+    port?: number;
+    auth?: {
+      token?: string;
+    };
+  };
   agents?: {
     defaults?: {
       model?: {
@@ -78,6 +84,23 @@ export function extractAgentsFromConfig(config: OpenClawConfig): AgentInfo[] {
   }
 
   return agents;
+}
+
+export interface LocalGatewayDefaults {
+  gatewayUrl?: string;
+  gatewayToken?: string;
+}
+
+export function extractLocalGatewayDefaults(config: OpenClawConfig): LocalGatewayDefaults {
+  const port = config.gateway?.port;
+  const token = config.gateway?.auth?.token?.trim();
+
+  return {
+    ...(typeof port === "number" && Number.isFinite(port)
+      ? { gatewayUrl: `http://127.0.0.1:${Math.trunc(port)}` }
+      : {}),
+    ...(token ? { gatewayToken: token } : {}),
+  };
 }
 
 export function addBindingToConfig(config: OpenClawConfig, agent: AgentInfo): OpenClawConfig {
