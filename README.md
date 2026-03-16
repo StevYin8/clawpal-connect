@@ -1,123 +1,115 @@
-# clawpal-connect (hosted relay connector, MVP v0.2.0)
+# clawpal-connect (hosted relay connector)
 
-`clawpal-connect` is the standalone host-side connector for **ClawPal official hosted relay mode**.
+`clawpal-connect` 是 ClawPal 官方 relay 模式的宿主连接器 CLI。
 
-This repo is intentionally aligned to the current mainline docs (2026-03-11):
-- App connects to official backend.
-- Connector connects outbound to official backend.
-- Backend forwards requests to connector and receives streamed responses.
+## 产品主流程（推荐且默认）
+1. 全局安装：
 
-Direct/pairing-first flows are not the primary story here.
+```bash
+npm install -g clawpal-connect
+```
 
-## Positioning
+2. 直接运行：
 
-`clawpal-connect` is the user host connector, not the App UI and not the full official backend service.
+```bash
+clawpal-connect run
+```
 
-It is responsible for:
-- probing local OpenClaw gateway availability.
-- managing local host binding metadata.
-- maintaining connector lifecycle (connect, heartbeat, request handling).
-- receiving backend-forwarded requests and returning streamed events.
+3. 如果本机还没有绑定，终端会立即打印 pairing code。
+4. 在 ClawPal App 里输入该 pairing code 完成绑定。
+5. 绑定完成后，当前 `run` 进程会继续启动 connector 运行时（不需要重新执行命令）。
 
-It is not responsible for:
-- ClawPal App UI.
-- official account/auth domain model.
-- production backend transport implementation in this repo.
+## 首次运行示例
 
-## Current MVP capabilities
+```bash
+$ clawpal-connect run
+No local binding found. Starting a new pairing session...
+pairing code=AB12CD
+action=Enter this code in ClawPal App to bind this connector.
+status=Waiting for binding completion...
+status=Binding completed. Continuing connector startup...
+...
+connector started for host=host-xxx via transport=ws
+```
 
-- `gateway_detector`: probes local OpenClaw gateway via `POST /tools/invoke` + `session_status`.
-- `host_registry`: local host binding persistence (`~/.clawpal-connect/host-registry.json`).
-- `backend_client`: connector-side abstraction over backend transport and event emission.
-- `mock_backend_transport`: local mock transport for relay-flow demo/testing.
-- `runtime_worker`: handles forwarded requests and emits streamed `message.*` events.
-- `heartbeat_manager`: periodic `host.status` events.
-- `connector_runtime`: orchestration of registry + backend + worker + heartbeat.
-- `clawpal-connect` CLI lifecycle commands: `status`, `bind`, `start`, `demo`.
-- local web UI retained only for diagnostics (`start --web-ui`).
+## 已绑定机器的行为
 
-## Install
+如果本地已经存在有效绑定：
 
-Requirements:
-- Node.js 20+
-- npm 10+
+```bash
+clawpal-connect run
+```
+
+会直接按原有流程启动，不会再次进入 pairing。
+
+## 命令
+
+### `clawpal-connect run`
+
+```bash
+clawpal-connect run
+```
+
+常用参数：
+- `--backend-url <url>`：覆盖 relay backend 地址（首次无绑定时也用于创建 pairing session）
+- `--gateway <url>`：覆盖本次运行的 OpenClaw gateway 地址
+- `--token <token>`：覆盖本次运行的 OpenClaw gateway token
+- `--timeout-ms <ms>`：覆盖本次运行的 gateway probe timeout
+- `--heartbeat-ms <ms>`：覆盖本次运行的 heartbeat interval
+- `--web-ui`：打开本地诊断页面
+
+### `clawpal-connect pair`（可选高级命令）
+
+```bash
+clawpal-connect pair
+```
+
+`pair` 会创建 pairing session、打印 code、等待 App 完成绑定，并把绑定与运行默认配置写入本地；它不会启动 connector 生命周期。
+
+常用参数：
+- `--backend-url <url>`：relay backend 地址
+- `--host-name <name>`：配对时上报的宿主显示名
+- `--gateway <url>`：写入本地 runtime 默认 gateway
+- `--token <token>`：写入本地 runtime 默认 token
+- `--timeout-ms <ms>`：写入本地 runtime 默认 timeout
+- `--heartbeat-ms <ms>`：写入本地 runtime 默认 heartbeat
+
+### `clawpal-connect status`
+
+```bash
+clawpal-connect status --gateway http://127.0.0.1:18789 --token "$OPENCLAW_GATEWAY_TOKEN"
+```
+
+查看 gateway 检测状态、本地绑定状态。
+
+## 本地持久化文件
+
+- Host registry：`~/.clawpal-connect/host-registry.json`
+- Runtime config：`~/.clawpal-connect/runtime-config.json`
+
+首次 `run` 配对成功后，这两个文件会自动写入。
+
+## Relay 对接契约（connector 侧）
+
+首次无绑定时，connector 期望 relay 提供：
+
+1. `POST /connector/pair/session`
+- 用途：创建新的 pairing session，返回短码
+- 期望返回字段（最小集）：`sessionId`、`code`
+- 可选返回：`statusEndpoint`、`pollAfterMs`、`expiresAt`
+
+2. `GET /connector/pair/session/:sessionId`
+- 用途：轮询 session 状态
+- pending 状态：`pending`/`waiting`/`created` 等
+- 完成状态：`paired`/`bound`/`completed` 等，并返回绑定信息（至少 `hostId` + `userId`）
+- 失败状态：`expired`/`cancelled`/`failed` 等
+
+绑定完成 payload 中可附带 runtime 默认配置（如 `gatewayUrl`、`gatewayToken`、`heartbeatMs`、`gatewayTimeoutMs`），connector 会自动持久化。
+
+## 开发与测试
 
 ```bash
 npm install
-```
-
-## CLI usage
-
-Check local gateway and host binding status:
-
-```bash
-npm run status -- --gateway http://127.0.0.1:3456 --token "$OPENCLAW_GATEWAY_TOKEN"
-```
-
-Bind connector host metadata locally:
-
-```bash
-npm run bind -- \
-  --host-id my-host \
-  --host-name "My Mac" \
-  --user-id user-123 \
-  --backend-url https://relay.clawpal.example
-```
-
-Start connector lifecycle loop (mock transport, optional diagnostics UI):
-
-```bash
-npm run start:dev -- --web-ui
-```
-
-Run end-to-end local relay demo (forwarded request -> streamed result):
-
-```bash
-npm run demo -- --message "hello from app"
-```
-
-`demo` intentionally uses mock transport + mock runtime execution and bypasses real gateway availability checks so relay event flow can be validated locally.
-
-## Event model
-
-The mock relay flow emits backend-style events:
-- `host.status`
-- `message.start`
-- `message.delta`
-- `message.done`
-- `message.error`
-
-## Architecture
-
-```text
-src/
-  cli.ts
-  gateway_detector.ts
-  host_registry.ts
-  backend_client.ts
-  mock_backend_transport.ts
-  runtime_worker.ts
-  heartbeat_manager.ts
-  connector_runtime.ts
-  web/
-    local_web_ui.ts
-tests/
-  *.test.ts
-```
-
-## Explicit TODO boundaries (official backend)
-
-This repository does **not** claim production backend readiness.
-
-Still TODO for the official backend integration:
-- real long-connection transport adapter (WebSocket/gRPC/SSE contract with official backend).
-- official bind/login/token issuance flow and secure token refresh.
-- production-grade reconnect policy and retry backoff strategy.
-- secure secret storage (current local registry is plain JSON for MVP scaffolding).
-- real OpenClaw streaming bridge (runtime worker currently uses a mock executor for demo).
-
-## Test
-
-```bash
+npm run build
 npm test
 ```
