@@ -64,6 +64,7 @@ export interface PairingResolveOptions {
 
 export interface PairingSessionStartOptions {
   backendUrl: string;
+  hostId: string;
   hostName?: string;
   fetchImpl?: typeof fetch;
   paths?: readonly string[];
@@ -73,6 +74,7 @@ export interface PairingSession {
   sessionId: string;
   code: string;
   backendUrl: string;
+  hostId: string;
   hostName: string;
   createEndpoint: string;
   statusEndpoint: string;
@@ -411,7 +413,7 @@ function resolvePairingSessionFromPayload(payload: PairingApiPayload): ResolvedP
 
   for (const candidate of candidates) {
     if (!sessionId) {
-      sessionId = readString(candidate, ["sessionId", "session_id", "pairSessionId", "pair_session_id", "id"]);
+      sessionId = readString(candidate, ["sessionId", "session_id", "pairSessionId", "pair_session_id", "pairingSessionId", "pairing_session_id", "id"]);
     }
 
     if (!code) {
@@ -701,6 +703,7 @@ async function probePairingSession(options: {
 
 export async function startPairingSession(options: PairingSessionStartOptions): Promise<PairingSession> {
   const backendUrl = parseBackendUrl(options.backendUrl).toString();
+  const hostId = normalizeRequired(options.hostId, "hostId");
   const hostName = options.hostName?.trim() || hostname();
   const fetchImpl = options.fetchImpl ?? fetch;
   const paths = options.paths ?? DEFAULT_PAIR_SESSION_CREATE_PATHS;
@@ -718,7 +721,10 @@ export async function startPairingSession(options: PairingSessionStartOptions): 
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          hostId,
+          hostName,
           connector: {
+            hostId,
             hostName
           }
         })
@@ -751,6 +757,7 @@ export async function startPairingSession(options: PairingSessionStartOptions): 
         sessionId: session.sessionId,
         code: session.code,
         backendUrl,
+        hostId,
         hostName,
         createEndpoint: endpoint,
         statusEndpoint: resolvedStatusEndpoint,

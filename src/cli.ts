@@ -99,7 +99,7 @@ interface DiagnosticsTransport {
   getSentEvents(): ConnectorEvent[];
 }
 
-const DEFAULT_BACKEND_URL = "https://relay.clawpal.example";
+const DEFAULT_BACKEND_URL = "http://120.55.96.42:3001";
 
 function parsePositiveInt(value: string): number {
   const parsed = Number.parseInt(value, 10);
@@ -201,6 +201,20 @@ function resolveBackendUrl(value?: string): string {
     normalizeOptional(process.env.CLAWPAL_BACKEND_URL) ??
     DEFAULT_BACKEND_URL
   );
+}
+
+function deriveConnectorHostId(): string {
+  const explicit = normalizeOptional(process.env.CLAWPAL_HOST_ID);
+  if (explicit) {
+    return explicit;
+  }
+
+  const raw = hostname().trim().toLowerCase();
+  const normalized = raw
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63);
+  return normalized || "clawpal-host";
 }
 
 function buildHostRegistry(options: RegistryCliOptions): HostRegistry {
@@ -524,6 +538,7 @@ async function runLifecycleLoop(options: {
 
 async function requestAndWaitForPairing(options: {
   backendUrl: string;
+  hostId: string;
   hostName: string;
   reason: "no_binding" | "manual";
 }) {
@@ -535,6 +550,7 @@ async function requestAndWaitForPairing(options: {
 
   const session = await startPairingSession({
     backendUrl: options.backendUrl,
+    hostId: options.hostId,
     hostName: options.hostName
   });
 
@@ -631,9 +647,11 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
   const runtimeConfigStore = buildRuntimeConfigStore(options);
   const backendUrl = resolveBackendUrl(options.backendUrl);
   const hostName = normalizeOptional(options.hostName) ?? hostname();
+  const hostId = deriveConnectorHostId();
 
   const pairing = await requestAndWaitForPairing({
     backendUrl,
+    hostId,
     hostName,
     reason: "manual"
   });
@@ -718,8 +736,10 @@ async function runRunCommand(options: RunCliOptions): Promise<void> {
   let activeHost = await registry.getActiveHost();
   if (!activeHost) {
     const hostName = normalizeOptional(process.env.CLAWPAL_HOST_NAME) ?? hostname();
+    const hostId = deriveConnectorHostId();
     const pairing = await requestAndWaitForPairing({
       backendUrl: resolveBackendUrl(options.backendUrl),
+      hostId,
       hostName,
       reason: "no_binding"
     });
@@ -868,7 +888,7 @@ withRegistryOption(program.command("bind").description("Bind local connector hos
   .requiredOption(
     "--backend-url <url>",
     "Official backend base URL",
-    process.env.CLAWPAL_BACKEND_URL ?? "https://relay.clawpal.example"
+    process.env.CLAWPAL_BACKEND_URL ?? DEFAULT_BACKEND_URL
   )
   .option("--connector-token <token>", "Connector token placeholder", process.env.CLAWPAL_CONNECTOR_TOKEN ?? "")
   .option("--binding-code <code>", "Bind code placeholder", process.env.CLAWPAL_BIND_CODE ?? "")
@@ -894,7 +914,7 @@ withLifecycleOptions(
   .option(
     "--bind-backend-url <url>",
     "Backend URL used by demo auto-bind",
-    "https://relay.clawpal.example"
+    DEFAULT_BACKEND_URL
   )
   .action(async (options: DemoCliOptions) => {
     await runDemoCommand(options);
