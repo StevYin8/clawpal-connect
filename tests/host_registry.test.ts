@@ -16,7 +16,7 @@ function host(input: Partial<RegisteredHost> = {}): RegisteredHost {
     hostId: input.hostId ?? "host-1",
     userId: input.userId ?? "user-1",
     hostName: input.hostName ?? "Mac Mini",
-    backendUrl: input.backendUrl ?? "https://relay.clawpal.example",
+    backendUrl: input.backendUrl ?? "http://relay.clawpal.example:3001",
     boundAt: input.boundAt ?? "2026-03-11T00:00:00.000Z",
     updatedAt: input.updatedAt ?? "2026-03-11T00:00:00.000Z",
     ...(input.connectorToken ? { connectorToken: input.connectorToken } : {}),
