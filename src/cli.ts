@@ -666,7 +666,7 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
     heartbeatMs: options.heartbeatMs,
   });
 
-  console.log("status=Binding completed.");
+  console.log("status=Binding completed. Continuing connector startup...");
   console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
   console.log(`user id=${activeHost.userId}`);
   console.log(`backend url=${activeHost.backendUrl}`);
@@ -675,7 +675,20 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
   console.log(`registry file=${registry.getStoreFilePath()}`);
   console.log(`runtime config=${runtimeConfigStore.getStoreFilePath()}`);
   console.log(`run defaults=transport=${runtimeConfig.transport}, gateway=${runtimeConfig.gatewayUrl}`);
-  console.log("next=Run `clawpal-connect run` to start connector lifecycle.");
+  console.log("");
+
+  await runRunCommand({
+    registryFile: options.registryFile,
+    runtimeConfigFile: options.runtimeConfigFile,
+    backendUrl,
+    ...(options.gateway ? { gateway: options.gateway } : {}),
+    ...(options.token ? { token: options.token } : {}),
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
+    webUi: false,
+    webHost: "127.0.0.1",
+    webPort: 8787,
+  });
 }
 
 async function runBindCommand(options: BindCliOptions): Promise<void> {
@@ -733,33 +746,9 @@ async function runRunCommand(options: RunCliOptions): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
 
-  let activeHost = await registry.getActiveHost();
+  const activeHost = await registry.getActiveHost();
   if (!activeHost) {
-    const hostName = normalizeOptional(process.env.CLAWPAL_HOST_NAME) ?? hostname();
-    const hostId = deriveConnectorHostId();
-    const pairing = await requestAndWaitForPairing({
-      backendUrl: resolveBackendUrl(options.backendUrl),
-      hostId,
-      hostName,
-      reason: "no_binding"
-    });
-
-    const persisted = await persistPairingResolution({
-      registry,
-      runtimeConfigStore,
-      resolved: pairing.resolved,
-      gateway: options.gateway,
-      token: options.token,
-      timeoutMs: options.timeoutMs,
-      heartbeatMs: options.heartbeatMs,
-    });
-    activeHost = persisted.activeHost;
-
-    console.log("status=Binding completed. Continuing connector startup...");
-    console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
-    console.log(`pair create endpoint=${pairing.session.createEndpoint}`);
-    console.log(`pair status endpoint=${pairing.resolved.endpoint}`);
-    console.log("");
+    throw new Error("No active host binding found. Run `clawpal-connect pair` first.");
   }
 
   const runtimeConfig = await runtimeConfigStore.loadConfig();
