@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 import { hostname } from "node:os";
-import { stdin as input, stdout as output } from "node:process";
-import { createInterface } from "node:readline/promises";
 
 import { Command, InvalidArgumentError } from "commander";
 
@@ -14,7 +12,7 @@ import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry } from "./host_registry.js";
 import type { RegisteredHost } from "./host_registry.js";
 import { createMockForwardedRequest, MockBackendTransport } from "./mock_backend_transport.js";
-import { resolvePairingCode } from "./pairing_client.js";
+import { startPairingSession, waitForPairingCompletion } from "./pairing_client.js";
 import {
   DEFAULT_RUNTIME_GATEWAY_URL,
   DEFAULT_RUNTIME_HEARTBEAT_MS,
@@ -69,7 +67,6 @@ interface DemoCliOptions extends StartCliOptions {
 }
 
 interface PairCliOptions extends RegistryCliOptions, RuntimeConfigCliOptions {
-  code?: string;
   backendUrl: string;
   hostName?: string;
   gateway?: string;
@@ -100,6 +97,8 @@ interface DiagnosticsTransport {
   isConnected(): boolean;
   getSentEvents(): ConnectorEvent[];
 }
+
+const DEFAULT_BACKEND_URL = "https://relay.clawpal.example";
 
 function parsePositiveInt(value: string): number {
   const parsed = Number.parseInt(value, 10);
@@ -157,11 +156,10 @@ function withLifecycleOptions(command: Command): Command {
 
 function withPairOptions(command: Command): Command {
   return withRuntimeConfigOption(withRegistryOption(command))
-    .option("--code <code>", "Short pairing code from ClawPal App")
     .option(
       "--backend-url <url>",
       "Official backend base URL",
-      process.env.CLAWPAL_BACKEND_URL ?? "https://relay.clawpal.example"
+      process.env.CLAWPAL_BACKEND_URL ?? DEFAULT_BACKEND_URL
     )
     .option("--host-name <name>", "Host display name used for pairing", process.env.CLAWPAL_HOST_NAME)
     .option("--gateway <url>", "Override OpenClaw gateway URL stored for run")
@@ -172,7 +170,10 @@ function withPairOptions(command: Command): Command {
 
 function withRunOptions(command: Command): Command {
   return withRuntimeConfigOption(withRegistryOption(command))
-    .option("--backend-url <url>", "Override backend URL from paired binding")
+    .option(
+      "--backend-url <url>",
+      "Override backend URL (also used for first-time pairing when no local binding exists)"
+    )
     .option("--gateway <url>", "Override OpenClaw gateway URL for this run")
     .option("--token <token>", "Override OpenClaw gateway token for this run")
     .option("--timeout-ms <ms>", "Override gateway probe timeout for this run", parsePositiveInt)
@@ -191,6 +192,14 @@ function normalizePath(path: string): string | undefined {
 function normalizeOptional(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
+}
+
+function resolveBackendUrl(value?: string): string {
+  return (
+    normalizeOptional(value) ??
+    normalizeOptional(process.env.CLAWPAL_BACKEND_URL) ??
+    DEFAULT_BACKEND_URL
+  );
 }
 
 function buildHostRegistry(options: RegistryCliOptions): HostRegistry {
@@ -237,7 +246,7 @@ function printStatusSnapshot(
   console.log(`registry file=${registryPath}`);
   if (!snapshot.activeHost) {
     console.log("active host=none");
-    console.log("hint=Run `clawpal-connect pair` to register this connector host.");
+    console.log("hint=Run `clawpal-connect run` to start pairing and register this connector host.");
   } else {
     console.log(`active host=${snapshot.activeHost.hostName} (${snapshot.activeHost.hostId})`);
     console.log(`user id=${snapshot.activeHost.userId}`);
@@ -383,7 +392,7 @@ async function createRuntimeForWsLifecycle(
   }
 
   if (!activeHost) {
-    throw new Error("No active host binding found. Run `clawpal-connect pair` first.");
+    throw new Error("No active host binding found. Run `clawpal-connect run` first.");
   }
 
   const envConnectorToken = normalizeOptional(process.env.CLAWPAL_CONNECTOR_TOKEN);
@@ -488,27 +497,89 @@ async function runLifecycleLoop(options: {
   }
 }
 
-async function resolvePairingCodeInput(value?: string): Promise<string> {
-  const direct = normalizeOptional(value);
-  if (direct) {
-    return direct;
+async function requestAndWaitForPairing(options: {
+  backendUrl: string;
+  hostName: string;
+  reason: "no_binding" | "manual";
+}) {
+  if (options.reason === "no_binding") {
+    console.log("No local binding found. Starting a new pairing session...");
+  } else {
+    console.log("Starting a new pairing session...");
   }
 
-  if (!input.isTTY || !output.isTTY) {
-    throw new Error("Pairing code is required. Use `--code <ABC123>` in non-interactive mode.");
-  }
+  const session = await startPairingSession({
+    backendUrl: options.backendUrl,
+    hostName: options.hostName
+  });
 
-  const rl = createInterface({ input, output });
-  try {
-    const answer = await rl.question("Enter pairing code: ");
-    const code = normalizeOptional(answer);
-    if (!code) {
-      throw new Error("Pairing code cannot be empty.");
+  console.log(`pairing code=${session.code}`);
+  if (session.expiresAt) {
+    console.log(`expires at=${session.expiresAt}`);
+  }
+  console.log("action=Enter this code in ClawPal App to bind this connector.");
+  console.log("status=Waiting for binding completion...");
+
+  const resolved = await waitForPairingCompletion({
+    session,
+    onPending: ({ attempt, pollAfterMs, status }) => {
+      if (attempt === 1 || attempt % 20 === 0) {
+        console.log(`status=${status ?? "pending"}, retry_in=${pollAfterMs}ms`);
+      }
     }
-    return code;
-  } finally {
-    rl.close();
+  });
+
+  return {
+    session,
+    resolved
+  };
+}
+
+async function persistPairingResolution(options: {
+  registry: HostRegistry;
+  runtimeConfigStore: RuntimeConfigStore;
+  resolved: Awaited<ReturnType<typeof waitForPairingCompletion>>;
+  gateway: string | undefined;
+  token: string | undefined;
+  timeoutMs: number | undefined;
+  heartbeatMs: number | undefined;
+}): Promise<{ activeHost: RegisteredHost; runtimeConfig: Awaited<ReturnType<RuntimeConfigStore["updateConfig"]>> }> {
+  await options.registry.bindHost({
+    hostId: options.resolved.binding.hostId,
+    hostName: options.resolved.binding.hostName,
+    userId: options.resolved.binding.userId,
+    backendUrl: options.resolved.binding.backendUrl,
+    ...(options.resolved.binding.connectorToken ? { connectorToken: options.resolved.binding.connectorToken } : {}),
+    bindingCode: options.resolved.binding.bindingCode
+  });
+
+  const gatewayUrl =
+    normalizeOptional(options.gateway) ??
+    normalizeOptional(options.resolved.runtimeConfig.gatewayUrl) ??
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    DEFAULT_RUNTIME_GATEWAY_URL;
+  const gatewayToken =
+    normalizeOptional(options.token) ??
+    normalizeOptional(options.resolved.runtimeConfig.gatewayToken) ??
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN);
+  const runtimeUpdate: RuntimeConfigUpdate = {
+    transport: "ws",
+    gatewayUrl,
+    gatewayTimeoutMs: options.timeoutMs ?? options.resolved.runtimeConfig.gatewayTimeoutMs ?? 8_000,
+    heartbeatMs: options.heartbeatMs ?? options.resolved.runtimeConfig.heartbeatMs ?? DEFAULT_RUNTIME_HEARTBEAT_MS,
+    gatewayToken: gatewayToken ?? ""
+  };
+
+  const runtimeConfig = await options.runtimeConfigStore.updateConfig(runtimeUpdate);
+  const activeHost = await options.registry.getActiveHost();
+  if (!activeHost) {
+    throw new Error("Failed to persist active host binding.");
   }
+
+  return {
+    activeHost,
+    runtimeConfig
+  };
 }
 
 async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
@@ -530,51 +601,31 @@ async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
 async function runPairCommand(options: PairCliOptions): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
-
-  const code = await resolvePairingCodeInput(options.code);
+  const backendUrl = resolveBackendUrl(options.backendUrl);
   const hostName = normalizeOptional(options.hostName) ?? hostname();
-  const resolved = await resolvePairingCode({
-    backendUrl: options.backendUrl,
-    code,
-    hostName
+
+  const pairing = await requestAndWaitForPairing({
+    backendUrl,
+    hostName,
+    reason: "manual"
   });
 
-  await registry.bindHost({
-    hostId: resolved.binding.hostId,
-    hostName: resolved.binding.hostName,
-    userId: resolved.binding.userId,
-    backendUrl: resolved.binding.backendUrl,
-    ...(resolved.binding.connectorToken ? { connectorToken: resolved.binding.connectorToken } : {}),
-    bindingCode: resolved.binding.bindingCode
+  const { activeHost, runtimeConfig } = await persistPairingResolution({
+    registry,
+    runtimeConfigStore,
+    resolved: pairing.resolved,
+    gateway: options.gateway,
+    token: options.token,
+    timeoutMs: options.timeoutMs,
+    heartbeatMs: options.heartbeatMs,
   });
 
-  const gatewayUrl =
-    normalizeOptional(options.gateway) ??
-    normalizeOptional(resolved.runtimeConfig.gatewayUrl) ??
-    normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
-    DEFAULT_RUNTIME_GATEWAY_URL;
-  const gatewayToken =
-    normalizeOptional(options.token) ??
-    normalizeOptional(resolved.runtimeConfig.gatewayToken) ??
-    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN);
-  const runtimeUpdate: RuntimeConfigUpdate = {
-    transport: "ws",
-    gatewayUrl,
-    gatewayTimeoutMs: options.timeoutMs ?? resolved.runtimeConfig.gatewayTimeoutMs ?? 8_000,
-    heartbeatMs: options.heartbeatMs ?? resolved.runtimeConfig.heartbeatMs ?? DEFAULT_RUNTIME_HEARTBEAT_MS,
-    gatewayToken: gatewayToken ?? ""
-  };
-
-  const runtimeConfig = await runtimeConfigStore.updateConfig(runtimeUpdate);
-  const activeHost = await registry.getActiveHost();
-  if (!activeHost) {
-    throw new Error("Failed to persist active host binding.");
-  }
-
+  console.log("status=Binding completed.");
   console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
   console.log(`user id=${activeHost.userId}`);
   console.log(`backend url=${activeHost.backendUrl}`);
-  console.log(`pair endpoint=${resolved.endpoint}`);
+  console.log(`pair create endpoint=${pairing.session.createEndpoint}`);
+  console.log(`pair status endpoint=${pairing.resolved.endpoint}`);
   console.log(`registry file=${registry.getStoreFilePath()}`);
   console.log(`runtime config=${runtimeConfigStore.getStoreFilePath()}`);
   console.log(`run defaults=transport=${runtimeConfig.transport}, gateway=${runtimeConfig.gatewayUrl}`);
@@ -635,13 +686,35 @@ async function runStartCommand(options: StartCliOptions): Promise<void> {
 async function runRunCommand(options: RunCliOptions): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
-  const runtimeConfig = await runtimeConfigStore.loadConfig();
 
-  const activeHost = await registry.getActiveHost();
+  let activeHost = await registry.getActiveHost();
   if (!activeHost) {
-    throw new Error("No paired host binding found. Run `clawpal-connect pair` first.");
+    const hostName = normalizeOptional(process.env.CLAWPAL_HOST_NAME) ?? hostname();
+    const pairing = await requestAndWaitForPairing({
+      backendUrl: resolveBackendUrl(options.backendUrl),
+      hostName,
+      reason: "no_binding"
+    });
+
+    const persisted = await persistPairingResolution({
+      registry,
+      runtimeConfigStore,
+      resolved: pairing.resolved,
+      gateway: options.gateway,
+      token: options.token,
+      timeoutMs: options.timeoutMs,
+      heartbeatMs: options.heartbeatMs,
+    });
+    activeHost = persisted.activeHost;
+
+    console.log("status=Binding completed. Continuing connector startup...");
+    console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
+    console.log(`pair create endpoint=${pairing.session.createEndpoint}`);
+    console.log(`pair status endpoint=${pairing.resolved.endpoint}`);
+    console.log("");
   }
 
+  const runtimeConfig = await runtimeConfigStore.loadConfig();
   const gateway =
     normalizeOptional(options.gateway) ??
     normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
@@ -693,7 +766,7 @@ async function runDemoCommand(options: DemoCliOptions): Promise<void> {
   }
 
   if (!activeHost) {
-    throw new Error("No active host binding found. Run `clawpal-connect pair` or pass `--auto-bind`.");
+    throw new Error("No active host binding found. Run `clawpal-connect run` or pass `--auto-bind`.");
   }
 
   const running = await runtime.start();
@@ -743,13 +816,15 @@ withGatewayOptions(program.command("status").description("Print gateway + host r
   }
 );
 
-withPairOptions(program.command("pair").description("Pair this host using a short code from ClawPal App")).action(
+withPairOptions(program.command("pair").description("Start pairing session, show code, and save binding defaults")).action(
   async (options: PairCliOptions) => {
     await runPairCommand(options);
   }
 );
 
-withRunOptions(program.command("run").description("Run connector using stored pair configuration")).action(
+withRunOptions(
+  program.command("run").description("Run connector; auto-start pairing when no local binding exists")
+).action(
   async (options: RunCliOptions) => {
     await runRunCommand(options);
   }
