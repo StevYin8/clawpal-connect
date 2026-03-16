@@ -1,20 +1,36 @@
 #!/usr/bin/env node
+import { hostname } from "node:os";
+import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from "node:readline/promises";
+
 import { Command, InvalidArgumentError } from "commander";
 
 import { syncAgentsToRelay } from "./agent_sync.js";
-import type { BackendConnectionContext, ConnectorEvent } from "./backend_client.js";
+import type { ConnectorEvent } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { ConnectorRuntime } from "./connector_runtime.js";
 import { describeGatewayStatus, GatewayDetector } from "./gateway_detector.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry } from "./host_registry.js";
+import type { RegisteredHost } from "./host_registry.js";
 import { createMockForwardedRequest, MockBackendTransport } from "./mock_backend_transport.js";
+import { resolvePairingCode } from "./pairing_client.js";
+import {
+  DEFAULT_RUNTIME_GATEWAY_URL,
+  DEFAULT_RUNTIME_HEARTBEAT_MS,
+  RuntimeConfigStore,
+  type RuntimeConfigUpdate
+} from "./runtime_config.js";
 import { RuntimeWorker } from "./runtime_worker.js";
 import { WsBackendTransport } from "./ws_backend_transport.js";
 import { startLocalWebUi, type ConnectorDiagnosticsSnapshot } from "./web/local_web_ui.js";
 
 interface RegistryCliOptions {
   registryFile: string;
+}
+
+interface RuntimeConfigCliOptions {
+  runtimeConfigFile: string;
 }
 
 interface GatewayCliOptions extends RegistryCliOptions {
@@ -52,6 +68,39 @@ interface DemoCliOptions extends StartCliOptions {
   bindBackendUrl: string;
 }
 
+interface PairCliOptions extends RegistryCliOptions, RuntimeConfigCliOptions {
+  code?: string;
+  backendUrl: string;
+  hostName?: string;
+  gateway?: string;
+  token?: string;
+  timeoutMs?: number;
+  heartbeatMs?: number;
+}
+
+interface RunCliOptions extends RegistryCliOptions, RuntimeConfigCliOptions {
+  backendUrl?: string;
+  gateway?: string;
+  token?: string;
+  timeoutMs?: number;
+  heartbeatMs?: number;
+  webUi: boolean;
+  webHost: string;
+  webPort: number;
+  durationMs?: number;
+}
+
+interface WsLifecycleOptions extends GatewayCliOptions {
+  backendUrl: string;
+  heartbeatMs: number;
+}
+
+interface DiagnosticsTransport {
+  readonly name: string;
+  isConnected(): boolean;
+  getSentEvents(): ConnectorEvent[];
+}
+
 function parsePositiveInt(value: string): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -76,12 +125,20 @@ function withRegistryOption(command: Command): Command {
   );
 }
 
+function withRuntimeConfigOption(command: Command): Command {
+  return command.option(
+    "--runtime-config-file <path>",
+    "Connector runtime defaults file path",
+    process.env.CLAWPAL_RUNTIME_CONFIG_FILE ?? ""
+  );
+}
+
 function withGatewayOptions(command: Command): Command {
   return withRegistryOption(command)
     .option(
       "--gateway <url>",
       "OpenClaw gateway base URL",
-      process.env.OPENCLAW_GATEWAY_URL ?? "http://127.0.0.1:3456"
+      process.env.OPENCLAW_GATEWAY_URL ?? DEFAULT_RUNTIME_GATEWAY_URL
     )
     .option("--token <token>", "OpenClaw gateway token", process.env.OPENCLAW_GATEWAY_TOKEN ?? "")
     .option("--timeout-ms <ms>", "Gateway probe timeout in milliseconds", parsePositiveInt, 8_000);
@@ -98,14 +155,52 @@ function withLifecycleOptions(command: Command): Command {
     .option("--duration-ms <ms>", "Auto-stop after N milliseconds", parsePositiveInt);
 }
 
-function normalizeRegistryPath(path: string): string | undefined {
+function withPairOptions(command: Command): Command {
+  return withRuntimeConfigOption(withRegistryOption(command))
+    .option("--code <code>", "Short pairing code from ClawPal App")
+    .option(
+      "--backend-url <url>",
+      "Official backend base URL",
+      process.env.CLAWPAL_BACKEND_URL ?? "https://relay.clawpal.example"
+    )
+    .option("--host-name <name>", "Host display name used for pairing", process.env.CLAWPAL_HOST_NAME)
+    .option("--gateway <url>", "Override OpenClaw gateway URL stored for run")
+    .option("--token <token>", "Override OpenClaw gateway token stored for run")
+    .option("--timeout-ms <ms>", "Gateway probe timeout stored for run", parsePositiveInt)
+    .option("--heartbeat-ms <ms>", "Heartbeat interval stored for run", parsePositiveInt);
+}
+
+function withRunOptions(command: Command): Command {
+  return withRuntimeConfigOption(withRegistryOption(command))
+    .option("--backend-url <url>", "Override backend URL from paired binding")
+    .option("--gateway <url>", "Override OpenClaw gateway URL for this run")
+    .option("--token <token>", "Override OpenClaw gateway token for this run")
+    .option("--timeout-ms <ms>", "Override gateway probe timeout for this run", parsePositiveInt)
+    .option("--heartbeat-ms <ms>", "Override heartbeat interval for this run", parsePositiveInt)
+    .option("--web-ui", "Enable local diagnostics web UI", false)
+    .option("--web-host <host>", "Local diagnostics web host", "127.0.0.1")
+    .option("--web-port <port>", "Local diagnostics web port", parsePositiveInt, 8787)
+    .option("--duration-ms <ms>", "Auto-stop after N milliseconds", parsePositiveInt);
+}
+
+function normalizePath(path: string): string | undefined {
   const value = path.trim();
   return value || undefined;
 }
 
+function normalizeOptional(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
 function buildHostRegistry(options: RegistryCliOptions): HostRegistry {
-  const registryFile = normalizeRegistryPath(options.registryFile);
+  const registryFile = normalizePath(options.registryFile);
   return new HostRegistry(registryFile ? { filePath: registryFile } : {});
+}
+
+function buildRuntimeConfigStore(options: RuntimeConfigCliOptions): RuntimeConfigStore {
+  const runtimeConfigFile = normalizePath(options.runtimeConfigFile);
+  return new RuntimeConfigStore(runtimeConfigFile ? { filePath: runtimeConfigFile } : {});
 }
 
 function buildGatewayDetector(options: GatewayCliOptions): GatewayDetector {
@@ -142,7 +237,7 @@ function printStatusSnapshot(
   console.log(`registry file=${registryPath}`);
   if (!snapshot.activeHost) {
     console.log("active host=none");
-    console.log("hint=Run `clawpal-connect bind` to register this connector host.");
+    console.log("hint=Run `clawpal-connect pair` to register this connector host.");
   } else {
     console.log(`active host=${snapshot.activeHost.hostName} (${snapshot.activeHost.hostId})`);
     console.log(`user id=${snapshot.activeHost.userId}`);
@@ -237,13 +332,38 @@ function createRuntimeForMockLifecycle(
   return { transport, runtime, registry };
 }
 
+async function rebindActiveHost(
+  registry: HostRegistry,
+  host: RegisteredHost,
+  updates: { backendUrl: string; connectorToken?: string }
+): Promise<RegisteredHost> {
+  await registry.bindHost({
+    hostId: host.hostId,
+    hostName: host.hostName,
+    userId: host.userId,
+    backendUrl: updates.backendUrl,
+    ...(updates.connectorToken ? { connectorToken: updates.connectorToken } : {}),
+    ...(host.bindingCode ? { bindingCode: host.bindingCode } : {})
+  });
+
+  const refreshed = await registry.getActiveHost();
+  if (!refreshed) {
+    throw new Error("Failed to persist active host binding.");
+  }
+
+  return refreshed;
+}
+
 async function createRuntimeForWsLifecycle(
-  options: StartCliOptions
+  options: WsLifecycleOptions,
+  overrides: { autoBindDefaultHost?: boolean } = {}
 ): Promise<{
   transport: WsBackendTransport;
   runtime: ConnectorRuntime;
+  registry: HostRegistry;
 }> {
-  if (!options.backendUrl) {
+  const backendUrl = options.backendUrl.trim();
+  if (!backendUrl) {
     throw new Error("--backend-url is required when using --transport ws");
   }
 
@@ -251,39 +371,32 @@ async function createRuntimeForWsLifecycle(
   const registry = buildHostRegistry(options);
   const gatewayDetector = buildGatewayDetector(options);
 
-  // Get active host from registry or create default
   let activeHost = await registry.getActiveHost();
-  if (!activeHost) {
-    // Auto-bind a default host for demo purposes
+  if (!activeHost && overrides.autoBindDefaultHost) {
     await registry.bindHost({
       hostId: "local-host",
       hostName: "Local Host",
       userId: "demo-user",
-      backendUrl: options.backendUrl
+      backendUrl
     });
     activeHost = await registry.getActiveHost();
   }
 
   if (!activeHost) {
-    throw new Error("Failed to get or create active host");
+    throw new Error("No active host binding found. Run `clawpal-connect pair` first.");
   }
 
-  const backendClient = new BackendClient({ transport });
-
-  // Connect to backend
-  const connectContext: BackendConnectionContext = {
-    backendUrl: options.backendUrl,
-    hostId: activeHost.hostId,
-    userId: activeHost.userId
-  };
-  if (process.env.CLAWPAL_CONNECTOR_TOKEN) {
-    connectContext.connectorToken = process.env.CLAWPAL_CONNECTOR_TOKEN;
+  const envConnectorToken = normalizeOptional(process.env.CLAWPAL_CONNECTOR_TOKEN);
+  const desiredConnectorToken = envConnectorToken ?? activeHost.connectorToken;
+  if (activeHost.backendUrl !== backendUrl || desiredConnectorToken !== activeHost.connectorToken) {
+    activeHost = await rebindActiveHost(registry, activeHost, {
+      backendUrl,
+      ...(desiredConnectorToken ? { connectorToken: desiredConnectorToken } : {})
+    });
   }
-  await transport.connect(connectContext);
 
-  // Sync agents from OpenClaw config to relay
   const agentSyncResult = await syncAgentsToRelay({
-    backendUrl: options.backendUrl,
+    backendUrl: activeHost.backendUrl,
     hostId: activeHost.hostId
   });
   if (agentSyncResult.synced > 0) {
@@ -293,11 +406,11 @@ async function createRuntimeForWsLifecycle(
   const runtime = new ConnectorRuntime({
     hostRegistry: registry,
     gatewayDetector,
-    backendClient,
+    backendClient: new BackendClient({ transport }),
     heartbeatManager: new HeartbeatManager({ intervalMs: options.heartbeatMs })
   });
 
-  return { transport, runtime };
+  return { transport, runtime, registry };
 }
 
 async function waitForShutdown(durationMs?: number): Promise<void> {
@@ -323,6 +436,81 @@ async function waitForShutdown(durationMs?: number): Promise<void> {
   });
 }
 
+async function runLifecycleLoop(options: {
+  runtime: ConnectorRuntime;
+  transport: DiagnosticsTransport;
+  registryPath: string;
+  webUi: boolean;
+  webHost: string;
+  webPort: number;
+  durationMs?: number;
+}): Promise<void> {
+  const statusSnapshot = await options.runtime.createStatusSnapshot();
+  printStatusSnapshot(statusSnapshot, options.registryPath);
+
+  const running = await options.runtime.start();
+  console.log("");
+  console.log(`connector started for host=${running.host.hostId} via transport=${options.transport.name}`);
+
+  let web: Awaited<ReturnType<typeof startLocalWebUi>> | undefined;
+  if (options.webUi) {
+    const getDiagnosticsSnapshot = (): ConnectorDiagnosticsSnapshot => {
+      const events = options.transport.getSentEvents();
+      const lastEvent = events.length > 0 ? events[events.length - 1] : undefined;
+      return {
+        generatedAt: new Date().toISOString(),
+        status: statusSnapshot,
+        backend: {
+          transport: options.transport.name,
+          connected: options.transport.isConnected(),
+          sentEvents: events.length,
+          ...(lastEvent ? { lastEvent } : {})
+        }
+      };
+    };
+
+    web = await startLocalWebUi(getDiagnosticsSnapshot, {
+      host: options.webHost,
+      port: options.webPort
+    });
+    console.log(`diagnostics web ui=${web.url}`);
+  }
+
+  console.log("Press Ctrl+C to stop.");
+
+  try {
+    await waitForShutdown(options.durationMs);
+  } finally {
+    if (web) {
+      await web.close();
+    }
+    await running.stop();
+  }
+}
+
+async function resolvePairingCodeInput(value?: string): Promise<string> {
+  const direct = normalizeOptional(value);
+  if (direct) {
+    return direct;
+  }
+
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error("Pairing code is required. Use `--code <ABC123>` in non-interactive mode.");
+  }
+
+  const rl = createInterface({ input, output });
+  try {
+    const answer = await rl.question("Enter pairing code: ");
+    const code = normalizeOptional(answer);
+    if (!code) {
+      throw new Error("Pairing code cannot be empty.");
+    }
+    return code;
+  } finally {
+    rl.close();
+  }
+}
+
 async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
   const transport = new MockBackendTransport();
   const runtime = new ConnectorRuntime({
@@ -337,6 +525,60 @@ async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
   if (!snapshot.gateway.ok || !snapshot.activeHost) {
     process.exitCode = 2;
   }
+}
+
+async function runPairCommand(options: PairCliOptions): Promise<void> {
+  const registry = buildHostRegistry(options);
+  const runtimeConfigStore = buildRuntimeConfigStore(options);
+
+  const code = await resolvePairingCodeInput(options.code);
+  const hostName = normalizeOptional(options.hostName) ?? hostname();
+  const resolved = await resolvePairingCode({
+    backendUrl: options.backendUrl,
+    code,
+    hostName
+  });
+
+  await registry.bindHost({
+    hostId: resolved.binding.hostId,
+    hostName: resolved.binding.hostName,
+    userId: resolved.binding.userId,
+    backendUrl: resolved.binding.backendUrl,
+    ...(resolved.binding.connectorToken ? { connectorToken: resolved.binding.connectorToken } : {}),
+    bindingCode: resolved.binding.bindingCode
+  });
+
+  const gatewayUrl =
+    normalizeOptional(options.gateway) ??
+    normalizeOptional(resolved.runtimeConfig.gatewayUrl) ??
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    DEFAULT_RUNTIME_GATEWAY_URL;
+  const gatewayToken =
+    normalizeOptional(options.token) ??
+    normalizeOptional(resolved.runtimeConfig.gatewayToken) ??
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN);
+  const runtimeUpdate: RuntimeConfigUpdate = {
+    transport: "ws",
+    gatewayUrl,
+    gatewayTimeoutMs: options.timeoutMs ?? resolved.runtimeConfig.gatewayTimeoutMs ?? 8_000,
+    heartbeatMs: options.heartbeatMs ?? resolved.runtimeConfig.heartbeatMs ?? DEFAULT_RUNTIME_HEARTBEAT_MS,
+    gatewayToken: gatewayToken ?? ""
+  };
+
+  const runtimeConfig = await runtimeConfigStore.updateConfig(runtimeUpdate);
+  const activeHost = await registry.getActiveHost();
+  if (!activeHost) {
+    throw new Error("Failed to persist active host binding.");
+  }
+
+  console.log(`paired host=${activeHost.hostName} (${activeHost.hostId})`);
+  console.log(`user id=${activeHost.userId}`);
+  console.log(`backend url=${activeHost.backendUrl}`);
+  console.log(`pair endpoint=${resolved.endpoint}`);
+  console.log(`registry file=${registry.getStoreFilePath()}`);
+  console.log(`runtime config=${runtimeConfigStore.getStoreFilePath()}`);
+  console.log(`run defaults=transport=${runtimeConfig.transport}, gateway=${runtimeConfig.gatewayUrl}`);
+  console.log("next=Run `clawpal-connect run` to start connector lifecycle.");
 }
 
 async function runBindCommand(options: BindCliOptions): Promise<void> {
@@ -363,60 +605,74 @@ async function runBindCommand(options: BindCliOptions): Promise<void> {
 }
 
 async function runStartCommand(options: StartCliOptions): Promise<void> {
-  let transport;
-  let runtime;
+  let transport: DiagnosticsTransport;
+  let runtime: ConnectorRuntime;
+  let registryPath: string;
 
   if (options.transport === "ws") {
-    const result = await createRuntimeForWsLifecycle(options);
+    const result = await createRuntimeForWsLifecycle(options, { autoBindDefaultHost: true });
     transport = result.transport;
     runtime = result.runtime;
+    registryPath = result.registry.getStoreFilePath();
   } else {
     const result = createRuntimeForMockLifecycle(options);
     transport = result.transport;
     runtime = result.runtime;
+    registryPath = result.registry.getStoreFilePath();
   }
 
-  const statusSnapshot = await runtime.createStatusSnapshot();
-  printStatusSnapshot(statusSnapshot, buildHostRegistry(options).getStoreFilePath());
+  await runLifecycleLoop({
+    runtime,
+    transport,
+    registryPath,
+    webUi: options.webUi,
+    webHost: options.webHost,
+    webPort: options.webPort,
+    ...(options.durationMs ? { durationMs: options.durationMs } : {})
+  });
+}
 
-  const running = await runtime.start();
-  console.log("");
-  console.log(`connector started for host=${running.host.hostId} via transport=${transport.name}`);
+async function runRunCommand(options: RunCliOptions): Promise<void> {
+  const registry = buildHostRegistry(options);
+  const runtimeConfigStore = buildRuntimeConfigStore(options);
+  const runtimeConfig = await runtimeConfigStore.loadConfig();
 
-  let web: Awaited<ReturnType<typeof startLocalWebUi>> | undefined;
-  if (options.webUi) {
-    const getDiagnosticsSnapshot = (): ConnectorDiagnosticsSnapshot => {
-      const events = transport.getSentEvents();
-      const lastEvent = events.length > 0 ? events[events.length - 1] : undefined;
-      return {
-        generatedAt: new Date().toISOString(),
-        status: statusSnapshot,
-        backend: {
-          transport: transport.name,
-          connected: transport.isConnected(),
-          sentEvents: events.length,
-          ...(lastEvent ? { lastEvent } : {})
-        }
-      };
-    };
-
-    web = await startLocalWebUi(getDiagnosticsSnapshot, {
-      host: options.webHost,
-      port: options.webPort
-    });
-    console.log(`diagnostics web ui=${web.url}`);
+  const activeHost = await registry.getActiveHost();
+  if (!activeHost) {
+    throw new Error("No paired host binding found. Run `clawpal-connect pair` first.");
   }
 
-  console.log("Press Ctrl+C to stop.");
+  const gateway =
+    normalizeOptional(options.gateway) ??
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_URL) ??
+    runtimeConfig.gatewayUrl;
+  const token =
+    normalizeOptional(options.token) ??
+    normalizeOptional(process.env.OPENCLAW_GATEWAY_TOKEN) ??
+    runtimeConfig.gatewayToken ??
+    "";
+  const wsLifecycleOptions: WsLifecycleOptions = {
+    registryFile: options.registryFile,
+    backendUrl: normalizeOptional(options.backendUrl) ?? activeHost.backendUrl,
+    gateway,
+    token,
+    timeoutMs: options.timeoutMs ?? runtimeConfig.gatewayTimeoutMs,
+    heartbeatMs: options.heartbeatMs ?? runtimeConfig.heartbeatMs
+  };
 
-  try {
-    await waitForShutdown(options.durationMs);
-  } finally {
-    if (web) {
-      await web.close();
-    }
-    await running.stop();
-  }
+  const result = await createRuntimeForWsLifecycle(wsLifecycleOptions, {
+    autoBindDefaultHost: false
+  });
+
+  await runLifecycleLoop({
+    runtime: result.runtime,
+    transport: result.transport,
+    registryPath: result.registry.getStoreFilePath(),
+    webUi: options.webUi,
+    webHost: options.webHost,
+    webPort: options.webPort,
+    ...(options.durationMs ? { durationMs: options.durationMs } : {})
+  });
 }
 
 async function runDemoCommand(options: DemoCliOptions): Promise<void> {
@@ -437,7 +693,7 @@ async function runDemoCommand(options: DemoCliOptions): Promise<void> {
   }
 
   if (!activeHost) {
-    throw new Error("No active host binding found. Run `clawpal-connect bind` or pass `--auto-bind`.");
+    throw new Error("No active host binding found. Run `clawpal-connect pair` or pass `--auto-bind`.");
   }
 
   const running = await runtime.start();
@@ -478,8 +734,8 @@ async function runDemoCommand(options: DemoCliOptions): Promise<void> {
 const program = new Command();
 program
   .name("clawpal-connect")
-  .description("ClawPal hosted-relay connector CLI (official-backend transport still TODO)")
-  .version("0.2.0");
+  .description("ClawPal hosted-relay connector CLI")
+  .version("0.3.0");
 
 withGatewayOptions(program.command("status").description("Print gateway + host registry status")).action(
   async (options: GatewayCliOptions) => {
@@ -487,7 +743,19 @@ withGatewayOptions(program.command("status").description("Print gateway + host r
   }
 );
 
-withRegistryOption(program.command("bind").description("Bind local connector host metadata"))
+withPairOptions(program.command("pair").description("Pair this host using a short code from ClawPal App")).action(
+  async (options: PairCliOptions) => {
+    await runPairCommand(options);
+  }
+);
+
+withRunOptions(program.command("run").description("Run connector using stored pair configuration")).action(
+  async (options: RunCliOptions) => {
+    await runRunCommand(options);
+  }
+);
+
+withRegistryOption(program.command("bind").description("Bind local connector host metadata (legacy advanced command)"))
   .requiredOption("--host-id <id>", "Connector host identifier", process.env.CLAWPAL_HOST_ID ?? "")
   .requiredOption("--host-name <name>", "Connector host display name", process.env.CLAWPAL_HOST_NAME ?? "")
   .requiredOption("--user-id <id>", "ClawPal user identifier", process.env.CLAWPAL_USER_ID ?? "")
@@ -502,7 +770,7 @@ withRegistryOption(program.command("bind").description("Bind local connector hos
     await runBindCommand(options);
   });
 
-withLifecycleOptions(program.command("start").description("Start connector lifecycle loop")).action(
+withLifecycleOptions(program.command("start").description("Start connector lifecycle loop (legacy advanced command)")).action(
   async (options: StartCliOptions) => {
     await runStartCommand(options);
   }
