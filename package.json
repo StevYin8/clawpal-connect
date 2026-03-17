@@ -5,9 +5,6 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "clawpal": "dist/cli.js"
-  },
   "files": [
     "dist",
     "README.md"
@@ -26,7 +23,8 @@
     "start": "node dist/cli.js start",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run build && npm run test"
+    "check": "npm run build && npm run test",
+    "postinstall": "node -e \"const fs=require('fs'),path=require('path');const prefix=(process.env.npm_config_prefix||'').trim();const pkg=(process.env.npm_package_json||'').trim();if(!prefix||!pkg){process.exit(0)};const root=path.dirname(pkg);const dist=path.join(root,'dist');if(!fs.existsSync(dist)){process.exit(0)};const stable=path.join(prefix,'lib','clawpal-standalone');fs.rmSync(stable,{recursive:true,force:true});fs.mkdirSync(stable,{recursive:true});fs.cpSync(dist,path.join(stable,'dist'),{recursive:true});const bin=path.join(prefix,'bin','clawpal');fs.rmSync(bin,{force:true});fs.writeFileSync(bin,`#!/bin/sh\nexec node \"${path.join(stable,'dist','cli.js')}\" \"$@\"\n`);fs.chmodSync(bin,0o755);\""
   },
   "dependencies": {
     "commander": "^12.1.0",
