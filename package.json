@@ -1,13 +1,31 @@
 {
   "name": "clawpal-connect",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Hosted-relay host connector CLI for ClawPal",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "clawpal": "dist/cli.js"
+  },
   "files": [
     "dist",
     "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/StevYin8/clawpal-connect.git"
+  },
+  "homepage": "https://github.com/StevYin8/clawpal-connect#readme",
+  "bugs": {
+    "url": "https://github.com/StevYin8/clawpal-connect/issues"
+  },
+  "keywords": [
+    "clawpal",
+    "connector",
+    "relay",
+    "cli",
+    "openclaw"
   ],
   "engines": {
     "node": ">=20.0.0"
@@ -24,7 +42,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run build && npm run test",
-    "postinstall": "node -e \"const fs=require('fs'),path=require('path');const prefix=(process.env.npm_config_prefix||'').trim();const pkg=(process.env.npm_package_json||'').trim();if(!prefix||!pkg){process.exit(0)};const root=path.dirname(pkg);const dist=path.join(root,'dist');if(!fs.existsSync(dist)){process.exit(0)};const stable=path.join(prefix,'lib','clawpal-standalone');const cli=path.join(stable,'dist','cli.js');fs.rmSync(stable,{recursive:true,force:true});fs.mkdirSync(stable,{recursive:true});fs.cpSync(dist,path.join(stable,'dist'),{recursive:true});const bin=path.join(prefix,'bin','clawpal');fs.rmSync(bin,{force:true});fs.writeFileSync(bin,'#!/bin/sh\\nexec node \\\"'+cli+'\\\" \"$@\"\\n');fs.chmodSync(bin,0o755);\""
+    "release:check": "npm run check && npm pack --dry-run"
   },
   "dependencies": {
     "commander": "^12.1.0",

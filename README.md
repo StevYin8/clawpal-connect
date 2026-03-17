@@ -6,7 +6,7 @@
 1. 全局安装：
 
 ```bash
-npm install -g git+https://github.com/StevYin8/clawpal-connect.git#main
+npm install -g clawpal-connect
 ```
 
 2. 首次绑定：
@@ -129,6 +129,35 @@ README 不再公开写死生产 relay 的公网 IP / 端口。
 - `--backend-url <url>`
 - `CLAWPAL_BACKEND_URL`
 进行注入，而不是把生产地址长期写进公开文档。
+
+## 发布到 npm
+
+发布前自检：
+
+```bash
+npm run release:check
+```
+
+登录 npm：
+
+```bash
+npm login
+npm whoami
+```
+
+正式发布：
+
+```bash
+npm publish
+```
+
+发布后用户安装：
+
+```bash
+npm install -g clawpal-connect
+clawpal --help
+clawpal pair
+```
 
 ## 开发与测试
 
