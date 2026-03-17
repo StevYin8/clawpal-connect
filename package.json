@@ -17,7 +17,6 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "preinstall": "sh -c 'DIR=$(dirname \"$npm_package_json\"); cd /; node \"$DIR/scripts/preinstall.js\"'",
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "dev": "tsx src/cli.ts demo",
