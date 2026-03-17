@@ -5,9 +5,6 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "clawpal-connect": "dist/cli.js"
-  },
   "files": [
     "dist",
     "README.md",
