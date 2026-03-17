@@ -5,17 +5,18 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "clawpal-connect": "dist/cli.js"
+  },
   "files": [
     "dist",
-    "README.md",
-    "scripts"
+    "README.md"
   ],
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "postinstall": "sh -c 'DIR=$(dirname \"$npm_package_json\"); cd /; node \"$DIR/scripts/postinstall.js\"'",
     "prepack": "npm run build",
     "dev": "tsx src/cli.ts demo",
     "status": "tsx src/cli.ts status",
