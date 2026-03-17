@@ -10,14 +10,16 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "scripts"
   ],
   "engines": {
     "node": ">=20.0.0"
   },
   "scripts": {
+    "preinstall": "node scripts/preinstall.js",
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
+    "prepack": "npm run build",
     "dev": "tsx src/cli.ts demo",
     "status": "tsx src/cli.ts status",
     "bind": "tsx src/cli.ts bind",
