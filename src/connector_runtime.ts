@@ -67,7 +67,7 @@ export class ConnectorRuntime {
   async start(): Promise<RunningConnector> {
     const activeHost = await this.hostRegistry.getActiveHost();
     if (!activeHost) {
-      throw new Error("No active host binding found. Run `clawpal-connect bind` first.");
+      throw new Error("No active host binding found. Run `clawpal bind` first.");
     }
 
     await this.backendClient.connect({

@@ -12,7 +12,7 @@ npm install -g git+https://github.com/StevYin8/clawpal-connect.git#main
 2. 首次绑定：
 
 ```bash
-clawpal-connect pair
+clawpal pair
 ```
 
 3. 终端会显示一个 **6 位 pairing code**。
@@ -22,7 +22,7 @@ clawpal-connect pair
 ## 首次绑定示例
 
 ```bash
-$ clawpal-connect pair
+$ clawpal pair
 Starting a new pairing session...
 pairing code=AB12CD
 action=Enter this code in ClawPal App to bind this connector.
@@ -37,17 +37,17 @@ connector started for host=host-xxx via transport=ws
 如果本地已经存在有效绑定：
 
 ```bash
-clawpal-connect run
+clawpal run
 ```
 
 会直接按原有流程启动，不会再次进入 pairing。
 
 ## 命令
 
-### `clawpal-connect pair`
+### `clawpal pair`
 
 ```bash
-clawpal-connect pair
+clawpal pair
 ```
 
 作用：
@@ -55,20 +55,20 @@ clawpal-connect pair
 - 打印 code
 - 等待 App 完成绑定
 - 写入本地绑定和运行配置
-- **绑定成功后自动继续执行 `clawpal-connect run` 的运行流程**
+- **绑定成功后自动继续执行 `clawpal run` 的运行流程**
 
 常用参数：
-- `--backend-url <url>`：relay backend 地址（默认 `http://120.55.96.42:3001`）
+- `--backend-url <url>`：relay backend 地址（默认使用发行版内置值，或由 `CLAWPAL_BACKEND_URL` 提供）
 - `--host-name <name>`：配对时上报的宿主显示名
 - `--gateway <url>`：覆盖本地 OpenClaw gateway 地址
 - `--token <token>`：覆盖本地 OpenClaw gateway token
 - `--timeout-ms <ms>`：覆盖 probe timeout
 - `--heartbeat-ms <ms>`：覆盖 heartbeat interval
 
-### `clawpal-connect run`
+### `clawpal run`
 
 ```bash
-clawpal-connect run
+clawpal run
 ```
 
 作用：
@@ -77,7 +77,7 @@ clawpal-connect run
 如果还没有绑定，会明确提示你先执行：
 
 ```bash
-clawpal-connect pair
+clawpal pair
 ```
 
 常用参数：
@@ -88,10 +88,10 @@ clawpal-connect pair
 - `--heartbeat-ms <ms>`：覆盖本次运行的 heartbeat interval
 - `--web-ui`：打开本地诊断页面
 
-### `clawpal-connect status`
+### `clawpal status`
 
 ```bash
-clawpal-connect status
+clawpal status
 ```
 
 查看 gateway 检测状态、本地绑定状态。
@@ -106,11 +106,12 @@ clawpal-connect status
 ## 当前默认行为
 
 ### backend
-默认使用：
+默认 backend 地址不在 README 中公开写死。
 
-```text
-http://120.55.96.42:3001
-```
+推荐做法：
+- 通过发行版内置默认值使用
+- 或显式传入：`--backend-url <url>`
+- 或通过环境变量提供：`CLAWPAL_BACKEND_URL`
 
 ### 本地 OpenClaw gateway
 如果你没有显式传 `--gateway/--token`，connector 会自动尝试读取：
@@ -120,6 +121,14 @@ http://120.55.96.42:3001
   - `gateway.auth.token`
 
 所以大多数情况下，用户不需要手填 gateway token。
+
+## 安全说明
+
+README 不再公开写死生产 relay 的公网 IP / 端口。
+如果需要覆盖默认 backend，请优先通过：
+- `--backend-url <url>`
+- `CLAWPAL_BACKEND_URL`
+进行注入，而不是把生产地址长期写进公开文档。
 
 ## 开发与测试
 

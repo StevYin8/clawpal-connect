@@ -139,7 +139,7 @@ function printStatusSnapshot(snapshot, registryPath) {
     console.log(`registry file=${registryPath}`);
     if (!snapshot.activeHost) {
         console.log("active host=none");
-        console.log("hint=Run `clawpal-connect run` to start pairing and register this connector host.");
+        console.log("hint=Run `clawpal run` to start pairing and register this connector host.");
     }
     else {
         console.log(`active host=${snapshot.activeHost.hostName} (${snapshot.activeHost.hostId})`);
@@ -238,7 +238,7 @@ async function createRuntimeForWsLifecycle(options, overrides = {}) {
         activeHost = await registry.getActiveHost();
     }
     if (!activeHost) {
-        throw new Error("No active host binding found. Run `clawpal-connect run` first.");
+        throw new Error("No active host binding found. Run `clawpal run` first.");
     }
     const envConnectorToken = normalizeOptional(process.env.CLAWPAL_CONNECTOR_TOKEN);
     const desiredConnectorToken = envConnectorToken ?? activeHost.connectorToken;
@@ -497,7 +497,7 @@ async function runRunCommand(options) {
     const runtimeConfigStore = buildRuntimeConfigStore(options);
     const activeHost = await registry.getActiveHost();
     if (!activeHost) {
-        throw new Error("No active host binding found. Run `clawpal-connect pair` first.");
+        throw new Error("No active host binding found. Run `clawpal pair` first.");
     }
     const runtimeConfig = await runtimeConfigStore.loadConfig();
     const localDefaults = await resolveLocalGatewayDefaults();
@@ -547,7 +547,7 @@ async function runDemoCommand(options) {
         console.log(`auto-bound demo host=${options.bindHostName} (${options.bindHostId})`);
     }
     if (!activeHost) {
-        throw new Error("No active host binding found. Run `clawpal-connect run` or pass `--auto-bind`.");
+        throw new Error("No active host binding found. Run `clawpal run` or pass `--auto-bind`.");
     }
     const running = await runtime.start();
     const request = createMockForwardedRequest({
@@ -577,7 +577,7 @@ async function runDemoCommand(options) {
 }
 const program = new Command();
 program
-    .name("clawpal-connect")
+    .name("clawpal")
     .description("ClawPal hosted-relay connector CLI")
     .version("0.3.0");
 withGatewayOptions(program.command("status").description("Print gateway + host registry status")).action(async (options) => {
@@ -615,7 +615,7 @@ withLifecycleOptions(program.command("demo").description("Run local mock relay d
 });
 program.parseAsync(process.argv).catch((error) => {
     const message = error instanceof Error ? error.message : "Unknown CLI error";
-    console.error(`clawpal-connect error: ${message}`);
+    console.error(`clawpal error: ${message}`);
     process.exit(1);
 });
 //# sourceMappingURL=cli.js.map

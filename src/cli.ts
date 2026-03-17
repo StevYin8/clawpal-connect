@@ -281,7 +281,7 @@ function printStatusSnapshot(
   console.log(`registry file=${registryPath}`);
   if (!snapshot.activeHost) {
     console.log("active host=none");
-    console.log("hint=Run `clawpal-connect run` to start pairing and register this connector host.");
+    console.log("hint=Run `clawpal run` to start pairing and register this connector host.");
   } else {
     console.log(`active host=${snapshot.activeHost.hostName} (${snapshot.activeHost.hostId})`);
     console.log(`user id=${snapshot.activeHost.userId}`);
@@ -431,7 +431,7 @@ async function createRuntimeForWsLifecycle(
   }
 
   if (!activeHost) {
-    throw new Error("No active host binding found. Run `clawpal-connect run` first.");
+    throw new Error("No active host binding found. Run `clawpal run` first.");
   }
 
   const envConnectorToken = normalizeOptional(process.env.CLAWPAL_CONNECTOR_TOKEN);
@@ -748,7 +748,7 @@ async function runRunCommand(options: RunCliOptions): Promise<void> {
 
   const activeHost = await registry.getActiveHost();
   if (!activeHost) {
-    throw new Error("No active host binding found. Run `clawpal-connect pair` first.");
+    throw new Error("No active host binding found. Run `clawpal pair` first.");
   }
 
   const runtimeConfig = await runtimeConfigStore.loadConfig();
@@ -806,7 +806,7 @@ async function runDemoCommand(options: DemoCliOptions): Promise<void> {
   }
 
   if (!activeHost) {
-    throw new Error("No active host binding found. Run `clawpal-connect run` or pass `--auto-bind`.");
+    throw new Error("No active host binding found. Run `clawpal run` or pass `--auto-bind`.");
   }
 
   const running = await runtime.start();
@@ -846,7 +846,7 @@ async function runDemoCommand(options: DemoCliOptions): Promise<void> {
 
 const program = new Command();
 program
-  .name("clawpal-connect")
+  .name("clawpal")
   .description("ClawPal hosted-relay connector CLI")
   .version("0.3.0");
 
@@ -911,6 +911,6 @@ withLifecycleOptions(
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : "Unknown CLI error";
-  console.error(`clawpal-connect error: ${message}`);
+  console.error(`clawpal error: ${message}`);
   process.exit(1);
 });
