@@ -1,6 +1,6 @@
 {
   "name": "clawpal-connect",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Hosted-relay host connector CLI for ClawPal",
   "license": "MIT",
   "type": "module",
