@@ -3,6 +3,7 @@ import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js"
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./host_registry.js";
 import { RuntimeWorker } from "./runtime_worker.js";
+import { RuntimeStatusTracker, loadSyncedAgentIdsFromOpenClawConfig, type SyncedAgentIdProvider } from "./runtime_status_tracker.js";
 
 export interface ConnectorStatusSnapshot {
   generatedAt: string;
@@ -24,6 +25,7 @@ interface ConnectorRuntimeOptions {
   backendClient: BackendClient;
   runtimeWorker?: RuntimeWorker;
   heartbeatManager?: HeartbeatManager;
+  syncedAgentIdProvider?: SyncedAgentIdProvider;
   now?: () => Date;
 }
 
@@ -33,6 +35,7 @@ export class ConnectorRuntime {
   private readonly backendClient: BackendClient;
   private readonly runtimeWorker: RuntimeWorker;
   private readonly heartbeatManager: HeartbeatManager;
+  private readonly syncedAgentIdProvider: SyncedAgentIdProvider;
   private readonly now: () => Date;
 
   constructor(options: ConnectorRuntimeOptions) {
@@ -40,6 +43,7 @@ export class ConnectorRuntime {
     this.gatewayDetector = options.gatewayDetector;
     this.backendClient = options.backendClient;
     this.now = options.now ?? (() => new Date());
+    this.syncedAgentIdProvider = options.syncedAgentIdProvider ?? loadSyncedAgentIdsFromOpenClawConfig;
     this.runtimeWorker =
       options.runtimeWorker ??
       new RuntimeWorker({
@@ -70,6 +74,8 @@ export class ConnectorRuntime {
       throw new Error("No active host binding found. Run `clawpal bind` first.");
     }
 
+    const runtimeStatusTracker = new RuntimeStatusTracker(await this.loadSyncedAgentIds());
+
     await this.backendClient.connect({
       backendUrl: activeHost.backendUrl,
       hostId: activeHost.hostId,
@@ -82,9 +88,14 @@ export class ConnectorRuntime {
         return;
       }
 
-      await this.runtimeWorker.handleForwardedRequest(request, async (event) => {
-        await this.backendClient.sendEvent(event);
-      });
+      runtimeStatusTracker.markForwardedRequestStarted(request);
+      try {
+        await this.runtimeWorker.handleForwardedRequest(request, async (event) => {
+          await this.backendClient.sendEvent(event);
+        });
+      } finally {
+        runtimeStatusTracker.markForwardedRequestCompleted(request.requestId);
+      }
     });
 
     const stopHeartbeat = this.heartbeatManager.start({
@@ -92,7 +103,8 @@ export class ConnectorRuntime {
       sendEvent: async (event) => {
         await this.backendClient.sendEvent(event);
       },
-      statusProvider: () => "online"
+      statusProvider: () => (runtimeStatusTracker.hasActiveWork() ? "busy" : "online"),
+      agentStatusProviders: runtimeStatusTracker.getAgentStatusProviders()
     });
 
     let stopped = false;
@@ -118,5 +130,15 @@ export class ConnectorRuntime {
       "Host binding currently stores connector metadata locally in plain JSON.",
       "Runtime worker still uses a mock OpenClaw streaming bridge for demo flows."
     ];
+  }
+
+  private async loadSyncedAgentIds(): Promise<string[]> {
+    try {
+      return await this.syncedAgentIdProvider();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to load synced agents from OpenClaw config: ${message}`);
+      return [];
+    }
   }
 }
