@@ -1,10 +1,22 @@
-import type { ConnectorEventInput, HostConnectionStatus } from "./backend_client.js";
+import type { AgentDisplayStatus, ConnectorEventInput, HostConnectionStatus } from "./backend_client.js";
+
+export interface AgentStatusProvider {
+  agentId: string;
+  displayStatus: AgentDisplayStatus;
+  currentWorkTitle?: string;
+  currentWorkSummary?: string;
+  progressCurrent?: number;
+  progressTotal?: number;
+  hasPendingConfirmation?: boolean;
+  hasActiveError?: boolean;
+}
 
 export interface HeartbeatStartOptions {
   hostId: string;
   sendEvent: (event: ConnectorEventInput) => Promise<void>;
   statusProvider?: () => HostConnectionStatus;
   detailProvider?: () => string | undefined;
+  agentStatusProviders?: AgentStatusProvider[];
 }
 
 export interface HeartbeatManagerOptions {
@@ -35,6 +47,23 @@ export class HeartbeatManager {
         status: options.statusProvider?.() ?? "online",
         ...(detail ? { detail } : {})
       });
+
+      // Send agent runtime status for each provider
+      const agentProviders = options.agentStatusProviders ?? [];
+      for (const provider of agentProviders) {
+        await options.sendEvent({
+          type: "agent.runtime.status",
+          agentId: provider.agentId,
+          hostId: options.hostId,
+          displayStatus: provider.displayStatus,
+          ...(provider.currentWorkTitle ? { currentWorkTitle: provider.currentWorkTitle } : {}),
+          ...(provider.currentWorkSummary ? { currentWorkSummary: provider.currentWorkSummary } : {}),
+          ...(typeof provider.progressCurrent === "number" ? { progressCurrent: provider.progressCurrent } : {}),
+          ...(typeof provider.progressTotal === "number" ? { progressTotal: provider.progressTotal } : {}),
+          ...(provider.hasPendingConfirmation ? { hasPendingConfirmation: provider.hasPendingConfirmation } : {}),
+          ...(provider.hasActiveError ? { hasActiveError: provider.hasActiveError } : {})
+        });
+      }
     };
 
     void sendHeartbeat().catch((error) => {

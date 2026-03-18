@@ -62,19 +62,37 @@ export interface MessageErrorEvent {
   at: string;
 }
 
+export type AgentDisplayStatus = "working" | "idle" | "waiting" | "error" | "offline" | "paused";
+
+export interface AgentRuntimeStatusEvent {
+  type: "agent.runtime.status";
+  agentId: string;
+  hostId: string;
+  displayStatus: AgentDisplayStatus;
+  currentWorkTitle?: string;
+  currentWorkSummary?: string;
+  progressCurrent?: number;
+  progressTotal?: number;
+  hasPendingConfirmation?: boolean;
+  hasActiveError?: boolean;
+  at: string;
+}
+
 export type ConnectorEvent =
   | HostStatusEvent
   | MessageStartEvent
   | MessageDeltaEvent
   | MessageDoneEvent
-  | MessageErrorEvent;
+  | MessageErrorEvent
+  | AgentRuntimeStatusEvent;
 
 export type ConnectorEventInput =
   | Omit<HostStatusEvent, "at">
   | Omit<MessageStartEvent, "at">
   | Omit<MessageDeltaEvent, "at">
   | Omit<MessageDoneEvent, "at">
-  | Omit<MessageErrorEvent, "at">;
+  | Omit<MessageErrorEvent, "at">
+  | Omit<AgentRuntimeStatusEvent, "at">;
 
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 

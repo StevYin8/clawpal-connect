@@ -154,7 +154,7 @@ function printStatusSnapshot(snapshot, registryPath) {
     }
 }
 function isRequestEvent(event) {
-    return event.type !== "host.status";
+    return event.type !== "host.status" && event.type !== "agent.runtime.status";
 }
 function formatEventLine(event) {
     if (event.type === "host.status") {
@@ -168,6 +168,9 @@ function formatEventLine(event) {
     }
     if (event.type === "message.error") {
         return `${event.at} ${event.type} req=${event.requestId} code=${event.code} message=${JSON.stringify(event.message)}`;
+    }
+    if (event.type === "agent.runtime.status") {
+        return `${event.at} ${event.type} agent=${event.agentId} status=${event.displayStatus}`;
     }
     return `${event.at} ${event.type} req=${event.requestId}`;
 }

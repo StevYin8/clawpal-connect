@@ -1,9 +1,20 @@
-import type { ConnectorEventInput, HostConnectionStatus } from "./backend_client.js";
+import type { AgentDisplayStatus, ConnectorEventInput, HostConnectionStatus } from "./backend_client.js";
+export interface AgentStatusProvider {
+    agentId: string;
+    displayStatus: AgentDisplayStatus;
+    currentWorkTitle?: string;
+    currentWorkSummary?: string;
+    progressCurrent?: number;
+    progressTotal?: number;
+    hasPendingConfirmation?: boolean;
+    hasActiveError?: boolean;
+}
 export interface HeartbeatStartOptions {
     hostId: string;
     sendEvent: (event: ConnectorEventInput) => Promise<void>;
     statusProvider?: () => HostConnectionStatus;
     detailProvider?: () => string | undefined;
+    agentStatusProviders?: AgentStatusProvider[];
 }
 export interface HeartbeatManagerOptions {
     intervalMs?: number;

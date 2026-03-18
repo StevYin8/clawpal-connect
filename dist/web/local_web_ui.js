@@ -23,6 +23,9 @@ function renderLastEvent(event) {
     if (event.type === "host.status") {
         return `${event.type} (${event.status}) @ ${event.at}`;
     }
+    if (event.type === "agent.runtime.status") {
+        return `${event.type} agent=${event.agentId} (${event.displayStatus}) @ ${event.at}`;
+    }
     return `${event.type} (${event.requestId}) @ ${event.at}`;
 }
 export function renderLocalStatusPage(snapshot) {

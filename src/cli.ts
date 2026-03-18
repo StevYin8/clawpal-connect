@@ -298,8 +298,8 @@ function printStatusSnapshot(
 
 function isRequestEvent(
   event: ConnectorEvent
-): event is Exclude<ConnectorEvent, { type: "host.status" }> {
-  return event.type !== "host.status";
+): event is Exclude<ConnectorEvent, { type: "host.status" } | { type: "agent.runtime.status" }> {
+  return event.type !== "host.status" && event.type !== "agent.runtime.status";
 }
 
 function formatEventLine(event: ConnectorEvent): string {
@@ -317,6 +317,10 @@ function formatEventLine(event: ConnectorEvent): string {
 
   if (event.type === "message.error") {
     return `${event.at} ${event.type} req=${event.requestId} code=${event.code} message=${JSON.stringify(event.message)}`;
+  }
+
+  if (event.type === "agent.runtime.status") {
+    return `${event.at} ${event.type} agent=${event.agentId} status=${event.displayStatus}`;
   }
 
   return `${event.at} ${event.type} req=${event.requestId}`;
