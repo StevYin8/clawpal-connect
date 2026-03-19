@@ -201,6 +201,7 @@ export class WsBackendTransport implements BackendTransport {
         break;
       }
 
+      case "relay.forward_request":
       case "forwarded.request": {
         const request = payload.request as Record<string, unknown>;
         const forwardedRequest: ForwardedRequest = {
