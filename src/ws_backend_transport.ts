@@ -52,8 +52,9 @@ export class WsBackendTransport implements BackendTransport {
   private readonly sentEvents: ConnectorEvent[] = [];
   private readonly waiters: EventWaiter[] = [];
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectAttempts = Number.POSITIVE_INFINITY;
   private reconnectDelayMs = 1000;
+  private maxReconnectDelayMs = 30000;
   private _onClose?: (reason: string) => void;
 
   onForwardedRequest(handler: ForwardedRequestHandler): void {
@@ -113,19 +114,17 @@ export class WsBackendTransport implements BackendTransport {
   }
 
   private async attemptReconnect(): Promise<void> {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.log("[ws] Max reconnect attempts reached, giving up");
-      return;
-    }
-
     if (!this.context) {
       console.log("[ws] No context for reconnect");
       return;
     }
 
     this.reconnectAttempts++;
-    const delay = this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1);
-    console.log(`[ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    const delay = Math.min(this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1), this.maxReconnectDelayMs);
+    const maxLabel = Number.isFinite(this.maxReconnectAttempts)
+      ? String(this.maxReconnectAttempts)
+      : '∞';
+    console.log(`[ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${maxLabel})`);
 
     await new Promise((resolve) => setTimeout(resolve, delay));
 
@@ -133,6 +132,7 @@ export class WsBackendTransport implements BackendTransport {
       await this.connect(this.context);
     } catch (err) {
       console.error("[ws] Reconnect failed:", err);
+      void this.attemptReconnect();
     }
   }
 
