@@ -104,15 +104,17 @@ describe("ConnectorRuntime", () => {
       const request = createMockForwardedRequest({
         hostId: "host-1",
         userId: "user-1",
+        agentId: "agent-a",
         requestId: "req-1",
         conversationId: "conv-1",
         message: "Summarize logs for March incident"
       });
       const forwardPromise = transport.forwardRequest(request);
 
-      await waitForCondition(() => providers.every((provider) => provider.displayStatus === "working"));
+      await waitForCondition(() => providers[0]?.displayStatus === "working");
       expect(providers[0]?.currentWorkTitle).toContain("Summarize logs for March incident");
       expect(providers[0]?.currentWorkSummary).toContain("Summarize logs for March incident");
+      expect(providers[1]?.displayStatus).toBe("idle");
 
       releaseExecution?.();
       await forwardPromise;
@@ -120,6 +122,8 @@ describe("ConnectorRuntime", () => {
       await waitForCondition(() => providers.every((provider) => provider.displayStatus === "idle"));
       expect(providers[0]?.currentWorkTitle).toBeUndefined();
       expect(providers[0]?.currentWorkSummary).toBeUndefined();
+      expect(providers[1]?.currentWorkTitle).toBeUndefined();
+      expect(providers[1]?.currentWorkSummary).toBeUndefined();
     } finally {
       releaseExecution?.();
       await running?.stop();

@@ -2,6 +2,7 @@ import type { BackendConnectionContext, BackendTransport, ConnectorEvent, Forwar
 export declare function createMockForwardedRequest(input: {
     hostId: string;
     userId: string;
+    agentId?: string;
     message: string;
     requestId?: string;
     conversationId?: string;

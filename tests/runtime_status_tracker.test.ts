@@ -17,6 +17,7 @@ describe("RuntimeStatusTracker", () => {
     const request = createMockForwardedRequest({
       hostId: "host-1",
       userId: "user-1",
+      agentId: "agent-a",
       requestId: "req-1",
       conversationId: "conv-1",
       message: "Summarize\nlogs for host"
@@ -41,6 +42,7 @@ describe("RuntimeStatusTracker", () => {
     const first = createMockForwardedRequest({
       hostId: "host-1",
       userId: "user-1",
+      agentId: "agent-a",
       requestId: "req-1",
       conversationId: "conv-1",
       message: "First request"
@@ -48,6 +50,7 @@ describe("RuntimeStatusTracker", () => {
     const second = createMockForwardedRequest({
       hostId: "host-1",
       userId: "user-1",
+      agentId: "agent-a",
       requestId: "req-2",
       conversationId: "conv-2",
       message: "Second request"

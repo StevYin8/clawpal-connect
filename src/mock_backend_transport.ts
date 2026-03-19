@@ -18,6 +18,7 @@ interface EventWaiter {
 export function createMockForwardedRequest(input: {
   hostId: string;
   userId: string;
+  agentId?: string;
   message: string;
   requestId?: string;
   conversationId?: string;
@@ -27,6 +28,7 @@ export function createMockForwardedRequest(input: {
     requestId: input.requestId ?? `req_${randomUUID()}`,
     hostId: input.hostId,
     userId: input.userId,
+    agentId: input.agentId ?? "agent-default",
     conversationId: input.conversationId ?? `conv_${randomUUID()}`,
     message: input.message,
     createdAt: input.createdAt ?? new Date().toISOString()

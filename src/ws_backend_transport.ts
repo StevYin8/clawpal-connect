@@ -159,6 +159,7 @@ export class WsBackendTransport implements BackendTransport {
           requestId: (request.requestId as string) ?? randomUUID(),
           hostId: (request.hostId as string) ?? "",
           userId: (request.userId as string) ?? "",
+          agentId: (request.agentId as string) ?? "",
           conversationId: (request.conversationId as string) ?? "",
           message: (request.message as string) ?? "",
           createdAt: (request.createdAt as string) ?? new Date().toISOString()

@@ -124,6 +124,7 @@ export class WsBackendTransport {
                     requestId: request.requestId ?? randomUUID(),
                     hostId: request.hostId ?? "",
                     userId: request.userId ?? "",
+                    agentId: request.agentId ?? "",
                     conversationId: request.conversationId ?? "",
                     message: request.message ?? "",
                     createdAt: request.createdAt ?? new Date().toISOString()

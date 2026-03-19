@@ -3,6 +3,7 @@ import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js"
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./host_registry.js";
 import { RuntimeWorker } from "./runtime_worker.js";
+import { type SyncedAgentIdProvider } from "./runtime_status_tracker.js";
 export interface ConnectorStatusSnapshot {
     generatedAt: string;
     gateway: GatewayProbeResult;
@@ -21,6 +22,7 @@ interface ConnectorRuntimeOptions {
     backendClient: BackendClient;
     runtimeWorker?: RuntimeWorker;
     heartbeatManager?: HeartbeatManager;
+    syncedAgentIdProvider?: SyncedAgentIdProvider;
     now?: () => Date;
 }
 export declare class ConnectorRuntime {
@@ -29,10 +31,12 @@ export declare class ConnectorRuntime {
     private readonly backendClient;
     private readonly runtimeWorker;
     private readonly heartbeatManager;
+    private readonly syncedAgentIdProvider;
     private readonly now;
     constructor(options: ConnectorRuntimeOptions);
     createStatusSnapshot(): Promise<ConnectorStatusSnapshot>;
     start(): Promise<RunningConnector>;
     private listTodoBoundaries;
+    private loadSyncedAgentIds;
 }
 export {};

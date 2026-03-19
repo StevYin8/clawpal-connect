@@ -8,6 +8,7 @@ const FALLBACK_WORK_TITLE = "Handling forwarded request";
 
 interface ActiveWorkContext {
   requestId: string;
+  agentId: string;
   title: string;
   summary: string;
   sequence: number;
@@ -90,6 +91,7 @@ export class RuntimeStatusTracker {
 
     this.activeWorkByRequestId.set(request.requestId, {
       requestId: request.requestId,
+      agentId: request.agentId,
       title,
       summary,
       sequence: this.nextSequence
@@ -109,8 +111,7 @@ export class RuntimeStatusTracker {
       return;
     }
 
-    const activeWork = this.selectMostRecentActiveWork();
-    if (!activeWork) {
+    if (this.activeWorkByRequestId.size === 0) {
       for (const provider of this.agentStatusProviders) {
         provider.displayStatus = "idle";
         delete provider.currentWorkTitle;
@@ -123,16 +124,25 @@ export class RuntimeStatusTracker {
       return;
     }
 
-    const additionalActiveRequestCount = this.activeWorkByRequestId.size - 1;
-    const workSummary =
-      additionalActiveRequestCount > 0
-        ? `${activeWork.summary} (+${additionalActiveRequestCount} more active request${additionalActiveRequestCount === 1 ? "" : "s"})`
-        : activeWork.summary;
-
-    // forwarded.request does not include an agentId today, so we cannot map work
-    // to a specific agent reliably. We mirror host-level activity to all synced
-    // agents instead of guessing.
     for (const provider of this.agentStatusProviders) {
+      const activeWork = this.selectMostRecentActiveWorkForAgent(provider.agentId);
+      if (!activeWork) {
+        provider.displayStatus = "idle";
+        delete provider.currentWorkTitle;
+        delete provider.currentWorkSummary;
+        delete provider.progressCurrent;
+        delete provider.progressTotal;
+        delete provider.hasPendingConfirmation;
+        delete provider.hasActiveError;
+        continue;
+      }
+
+      const additionalActiveRequestCount = this.countAdditionalActiveRequestsForAgent(provider.agentId, activeWork.requestId);
+      const workSummary =
+        additionalActiveRequestCount > 0
+          ? `${activeWork.summary} (+${additionalActiveRequestCount} more active request${additionalActiveRequestCount === 1 ? "" : "s"})`
+          : activeWork.summary;
+
       provider.displayStatus = "working";
       provider.currentWorkTitle = activeWork.title;
       provider.currentWorkSummary = workSummary;
@@ -143,13 +153,26 @@ export class RuntimeStatusTracker {
     }
   }
 
-  private selectMostRecentActiveWork(): ActiveWorkContext | undefined {
+  private selectMostRecentActiveWorkForAgent(agentId: string): ActiveWorkContext | undefined {
     let latest: ActiveWorkContext | undefined;
     for (const activeWork of this.activeWorkByRequestId.values()) {
+      if (activeWork.agentId !== agentId) {
+        continue;
+      }
       if (!latest || activeWork.sequence > latest.sequence) {
         latest = activeWork;
       }
     }
     return latest;
+  }
+
+  private countAdditionalActiveRequestsForAgent(agentId: string, currentRequestId: string): number {
+    let count = 0;
+    for (const activeWork of this.activeWorkByRequestId.values()) {
+      if (activeWork.agentId === agentId && activeWork.requestId !== currentRequestId) {
+        count += 1;
+      }
+    }
+    return count;
   }
 }

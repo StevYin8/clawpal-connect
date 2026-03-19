@@ -11,6 +11,7 @@ export interface ForwardedRequest {
   requestId: string;
   hostId: string;
   userId: string;
+  agentId: string;
   conversationId: string;
   message: string;
   createdAt: string;
