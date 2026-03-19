@@ -166,3 +166,9 @@ npm install
 npm run build
 npm test
 ```
+
+## OpenClaw 文件桥接（connector 侧）
+
+- connector 本地文件桥接服务已实现，见 `src/openclaw_agent_file_bridge.ts`
+- 目前已桥接 `~/.openclaw/openclaw.json`、agent workspace 的 `SOUL/IDENTITY/MEMORY/AGENTS` 相关文件、以及 workspace/shared skills 文件
+- relay/app 协议层 `agents.files.list/get/set` 仍需接线，详见 `docs/openclaw-agent-file-bridge.md`
