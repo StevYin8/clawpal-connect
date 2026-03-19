@@ -8,6 +8,7 @@ import { BackendClient, ConnectorRuntime, GatewayDetector, HeartbeatManager, Hos
 import { createMockForwardedRequest, MockBackendTransport } from "../src/mock_backend_transport.js";
 import type { GatewayProbeResult } from "../src/gateway_detector.js";
 import type { HeartbeatStartOptions } from "../src/heartbeat_manager.js";
+import type { OpenClawAgentActivity, SessionActivityMonitor } from "../src/openclaw_session_activity_monitor.js";
 
 class RecordingHeartbeatManager extends HeartbeatManager {
   lastStartOptions: HeartbeatStartOptions | undefined;
@@ -15,6 +16,31 @@ class RecordingHeartbeatManager extends HeartbeatManager {
   override start(options: HeartbeatStartOptions): () => void {
     this.lastStartOptions = options;
     return () => {};
+  }
+}
+
+class ControlledSessionActivityMonitor implements SessionActivityMonitor {
+  private onUpdate: ((activities: OpenClawAgentActivity[]) => void) | undefined;
+  private current: OpenClawAgentActivity[];
+
+  constructor(initialActivities: OpenClawAgentActivity[] = []) {
+    this.current = initialActivities;
+  }
+
+  async refresh(): Promise<OpenClawAgentActivity[]> {
+    return this.current;
+  }
+
+  start(onUpdate: (activities: OpenClawAgentActivity[]) => void): () => void {
+    this.onUpdate = onUpdate;
+    return () => {
+      this.onUpdate = undefined;
+    };
+  }
+
+  emit(activities: OpenClawAgentActivity[]): void {
+    this.current = activities;
+    this.onUpdate?.(activities);
   }
 }
 
@@ -126,6 +152,79 @@ describe("ConnectorRuntime", () => {
       expect(providers[1]?.currentWorkSummary).toBeUndefined();
     } finally {
       releaseExecution?.();
+      await running?.stop();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("applies local OpenClaw session activity and updates heartbeat status provider", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "clawpal-connector-runtime-"));
+    const registryPath = join(tempDir, "host-registry.json");
+    const registry = new HostRegistry({ filePath: registryPath });
+    await registry.bindHost({
+      hostId: "host-1",
+      userId: "user-1",
+      hostName: "Host 1",
+      backendUrl: "https://relay.example"
+    });
+
+    const transport = new MockBackendTransport();
+    const backendClient = new BackendClient({ transport });
+    const gatewayDetector = new GatewayDetector({
+      baseUrl: "http://127.0.0.1:18789",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+    });
+
+    const sessionActivityMonitor = new ControlledSessionActivityMonitor([
+      {
+        agentId: "agent-a",
+        isActive: true,
+        signal: "lock",
+        title: "Cron 任务执行中",
+        summary: "Cron 任务执行中"
+      }
+    ]);
+
+    const heartbeatManager = new RecordingHeartbeatManager();
+    const runtime = new ConnectorRuntime({
+      hostRegistry: registry,
+      gatewayDetector,
+      backendClient,
+      heartbeatManager,
+      syncedAgentIdProvider: async () => ["agent-a"],
+      sessionActivityMonitorFactory: () => sessionActivityMonitor
+    });
+
+    let running: Awaited<ReturnType<ConnectorRuntime["start"]>> | undefined;
+    try {
+      running = await runtime.start();
+
+      const startOptions = heartbeatManager.lastStartOptions;
+      expect(startOptions).toBeDefined();
+      expect(startOptions?.statusProvider?.()).toBe("busy");
+
+      const provider = startOptions?.agentStatusProviders?.[0];
+      expect(provider?.displayStatus).toBe("working");
+      expect(provider?.currentWorkTitle).toBe("Cron 任务执行中");
+      expect(provider?.currentWorkSummary).toBe("Cron 任务执行中");
+
+      sessionActivityMonitor.emit([
+        {
+          agentId: "agent-a",
+          isActive: false,
+          signal: "inactive"
+        }
+      ]);
+
+      await waitForCondition(() => provider?.displayStatus === "idle");
+      expect(startOptions?.statusProvider?.()).toBe("online");
+      expect(provider?.currentWorkTitle).toBeUndefined();
+      expect(provider?.currentWorkSummary).toBeUndefined();
+    } finally {
       await running?.stop();
       await rm(tempDir, { recursive: true, force: true });
     }

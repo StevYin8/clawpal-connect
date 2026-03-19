@@ -30,8 +30,9 @@ export class WsBackendTransport {
     sentEvents = [];
     waiters = [];
     reconnectAttempts = 0;
-    maxReconnectAttempts = 5;
+    maxReconnectAttempts = Number.POSITIVE_INFINITY;
     reconnectDelayMs = 1000;
+    maxReconnectDelayMs = 30000;
     _onClose;
     onForwardedRequest(handler) {
         this.forwardedRequestHandler = handler;
@@ -84,23 +85,23 @@ export class WsBackendTransport {
         });
     }
     async attemptReconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.log("[ws] Max reconnect attempts reached, giving up");
-            return;
-        }
         if (!this.context) {
             console.log("[ws] No context for reconnect");
             return;
         }
         this.reconnectAttempts++;
-        const delay = this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1);
-        console.log(`[ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        const delay = Math.min(this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1), this.maxReconnectDelayMs);
+        const maxLabel = Number.isFinite(this.maxReconnectAttempts)
+            ? String(this.maxReconnectAttempts)
+            : '∞';
+        console.log(`[ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${maxLabel})`);
         await new Promise((resolve) => setTimeout(resolve, delay));
         try {
             await this.connect(this.context);
         }
         catch (err) {
             console.error("[ws] Reconnect failed:", err);
+            void this.attemptReconnect();
         }
     }
     handleRelayMessage(payload) {

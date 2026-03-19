@@ -14,6 +14,7 @@ export declare class WsBackendTransport implements BackendTransport {
     private reconnectAttempts;
     private maxReconnectAttempts;
     private reconnectDelayMs;
+    private maxReconnectDelayMs;
     private _onClose?;
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     connect(context: BackendConnectionContext): Promise<void>;

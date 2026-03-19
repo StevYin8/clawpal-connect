@@ -1,10 +1,13 @@
 import type { ForwardedRequest } from "./backend_client.js";
 import type { AgentStatusProvider } from "./heartbeat_manager.js";
+import type { OpenClawAgentActivity } from "./openclaw_session_activity_monitor.js";
 import { extractAgentsFromConfig, readOpenClawConfig } from "./openclaw_config.js";
 
 const MAX_WORK_TITLE_CHARS = 72;
 const MAX_WORK_SUMMARY_CHARS = 220;
 const FALLBACK_WORK_TITLE = "Handling forwarded request";
+const FALLBACK_LOCAL_WORK_TITLE = "会话处理中";
+const FALLBACK_LOCAL_WORK_SUMMARY = "检测到本地会话活动";
 
 interface ActiveWorkContext {
   requestId: string;
@@ -67,6 +70,7 @@ export async function loadSyncedAgentIdsFromOpenClawConfig(): Promise<string[]> 
 export class RuntimeStatusTracker {
   private readonly agentStatusProviders: AgentStatusProvider[];
   private readonly activeWorkByRequestId = new Map<string, ActiveWorkContext>();
+  private readonly localSessionActivityByAgentId = new Map<string, OpenClawAgentActivity>();
   private nextSequence = 0;
 
   constructor(agentIds: string[]) {
@@ -81,7 +85,18 @@ export class RuntimeStatusTracker {
   }
 
   hasActiveWork(): boolean {
-    return this.activeWorkByRequestId.size > 0;
+    return this.activeWorkByRequestId.size > 0 || this.localSessionActivityByAgentId.size > 0;
+  }
+
+  updateOpenClawSessionActivities(activities: OpenClawAgentActivity[]): void {
+    this.localSessionActivityByAgentId.clear();
+    for (const activity of activities) {
+      if (!activity.isActive) {
+        continue;
+      }
+      this.localSessionActivityByAgentId.set(activity.agentId, activity);
+    }
+    this.syncAgentStatusProviders();
   }
 
   markForwardedRequestStarted(request: ForwardedRequest): void {
@@ -111,25 +126,25 @@ export class RuntimeStatusTracker {
       return;
     }
 
-    if (this.activeWorkByRequestId.size === 0) {
+    if (this.activeWorkByRequestId.size === 0 && this.localSessionActivityByAgentId.size === 0) {
       for (const provider of this.agentStatusProviders) {
-        provider.displayStatus = "idle";
-        delete provider.currentWorkTitle;
-        delete provider.currentWorkSummary;
-        delete provider.progressCurrent;
-        delete provider.progressTotal;
-        delete provider.hasPendingConfirmation;
-        delete provider.hasActiveError;
+        this.resetProviderToIdle(provider);
       }
       return;
     }
 
     for (const provider of this.agentStatusProviders) {
       const activeWork = this.selectMostRecentActiveWorkForAgent(provider.agentId);
-      if (!activeWork) {
-        provider.displayStatus = "idle";
-        delete provider.currentWorkTitle;
-        delete provider.currentWorkSummary;
+      if (activeWork) {
+        const additionalActiveRequestCount = this.countAdditionalActiveRequestsForAgent(provider.agentId, activeWork.requestId);
+        const workSummary =
+          additionalActiveRequestCount > 0
+            ? `${activeWork.summary} (+${additionalActiveRequestCount} more active request${additionalActiveRequestCount === 1 ? "" : "s"})`
+            : activeWork.summary;
+
+        provider.displayStatus = "working";
+        provider.currentWorkTitle = activeWork.title;
+        provider.currentWorkSummary = workSummary;
         delete provider.progressCurrent;
         delete provider.progressTotal;
         delete provider.hasPendingConfirmation;
@@ -137,15 +152,15 @@ export class RuntimeStatusTracker {
         continue;
       }
 
-      const additionalActiveRequestCount = this.countAdditionalActiveRequestsForAgent(provider.agentId, activeWork.requestId);
-      const workSummary =
-        additionalActiveRequestCount > 0
-          ? `${activeWork.summary} (+${additionalActiveRequestCount} more active request${additionalActiveRequestCount === 1 ? "" : "s"})`
-          : activeWork.summary;
+      const localActivity = this.localSessionActivityByAgentId.get(provider.agentId);
+      if (!localActivity) {
+        this.resetProviderToIdle(provider);
+        continue;
+      }
 
       provider.displayStatus = "working";
-      provider.currentWorkTitle = activeWork.title;
-      provider.currentWorkSummary = workSummary;
+      provider.currentWorkTitle = buildLocalWorkTitle(localActivity.title);
+      provider.currentWorkSummary = buildLocalWorkSummary(localActivity.summary, localActivity.title);
       delete provider.progressCurrent;
       delete provider.progressTotal;
       delete provider.hasPendingConfirmation;
@@ -175,4 +190,36 @@ export class RuntimeStatusTracker {
     }
     return count;
   }
+
+  private resetProviderToIdle(provider: AgentStatusProvider): void {
+    provider.displayStatus = "idle";
+    delete provider.currentWorkTitle;
+    delete provider.currentWorkSummary;
+    delete provider.progressCurrent;
+    delete provider.progressTotal;
+    delete provider.hasPendingConfirmation;
+    delete provider.hasActiveError;
+  }
+}
+
+function buildLocalWorkTitle(title: string | undefined): string {
+  const normalized = normalizeWhitespace(title ?? "");
+  if (!normalized) {
+    return FALLBACK_LOCAL_WORK_TITLE;
+  }
+  return truncate(normalized, MAX_WORK_TITLE_CHARS);
+}
+
+function buildLocalWorkSummary(summary: string | undefined, title: string | undefined): string {
+  const normalizedSummary = normalizeWhitespace(summary ?? "");
+  if (normalizedSummary) {
+    return truncate(normalizedSummary, MAX_WORK_SUMMARY_CHARS);
+  }
+
+  const normalizedTitle = normalizeWhitespace(title ?? "");
+  if (normalizedTitle) {
+    return truncate(normalizedTitle, MAX_WORK_SUMMARY_CHARS);
+  }
+
+  return FALLBACK_LOCAL_WORK_SUMMARY;
 }

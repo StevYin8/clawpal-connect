@@ -2,6 +2,7 @@ import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./host_registry.js";
+import { type SessionActivityMonitorFactory } from "./openclaw_session_activity_monitor.js";
 import { RuntimeWorker } from "./runtime_worker.js";
 import { type SyncedAgentIdProvider } from "./runtime_status_tracker.js";
 export interface ConnectorStatusSnapshot {
@@ -23,6 +24,7 @@ interface ConnectorRuntimeOptions {
     runtimeWorker?: RuntimeWorker;
     heartbeatManager?: HeartbeatManager;
     syncedAgentIdProvider?: SyncedAgentIdProvider;
+    sessionActivityMonitorFactory?: SessionActivityMonitorFactory;
     now?: () => Date;
 }
 export declare class ConnectorRuntime {
@@ -32,11 +34,13 @@ export declare class ConnectorRuntime {
     private readonly runtimeWorker;
     private readonly heartbeatManager;
     private readonly syncedAgentIdProvider;
+    private readonly sessionActivityMonitorFactory;
     private readonly now;
     constructor(options: ConnectorRuntimeOptions);
     createStatusSnapshot(): Promise<ConnectorStatusSnapshot>;
     start(): Promise<RunningConnector>;
     private listTodoBoundaries;
     private loadSyncedAgentIds;
+    private initializeSessionActivity;
 }
 export {};

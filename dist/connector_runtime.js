@@ -1,4 +1,5 @@
 import { HeartbeatManager } from "./heartbeat_manager.js";
+import { OpenClawSessionActivityMonitor } from "./openclaw_session_activity_monitor.js";
 import { RuntimeWorker } from "./runtime_worker.js";
 import { RuntimeStatusTracker, loadSyncedAgentIdsFromOpenClawConfig } from "./runtime_status_tracker.js";
 export class ConnectorRuntime {
@@ -8,6 +9,7 @@ export class ConnectorRuntime {
     runtimeWorker;
     heartbeatManager;
     syncedAgentIdProvider;
+    sessionActivityMonitorFactory;
     now;
     constructor(options) {
         this.hostRegistry = options.hostRegistry;
@@ -15,6 +17,8 @@ export class ConnectorRuntime {
         this.backendClient = options.backendClient;
         this.now = options.now ?? (() => new Date());
         this.syncedAgentIdProvider = options.syncedAgentIdProvider ?? loadSyncedAgentIdsFromOpenClawConfig;
+        this.sessionActivityMonitorFactory =
+            options.sessionActivityMonitorFactory ?? ((agentIds) => new OpenClawSessionActivityMonitor({ agentIds }));
         this.runtimeWorker =
             options.runtimeWorker ??
                 new RuntimeWorker({
@@ -41,7 +45,10 @@ export class ConnectorRuntime {
         if (!activeHost) {
             throw new Error("No active host binding found. Run `clawpal bind` first.");
         }
-        const runtimeStatusTracker = new RuntimeStatusTracker(await this.loadSyncedAgentIds());
+        const syncedAgentIds = await this.loadSyncedAgentIds();
+        const runtimeStatusTracker = new RuntimeStatusTracker(syncedAgentIds);
+        const sessionActivityMonitor = this.sessionActivityMonitorFactory(syncedAgentIds);
+        await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
         await this.backendClient.connect({
             backendUrl: activeHost.backendUrl,
             hostId: activeHost.hostId,
@@ -62,6 +69,9 @@ export class ConnectorRuntime {
                 runtimeStatusTracker.markForwardedRequestCompleted(request.requestId);
             }
         });
+        const stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
+            runtimeStatusTracker.updateOpenClawSessionActivities(activities);
+        });
         const stopHeartbeat = this.heartbeatManager.start({
             hostId: activeHost.hostId,
             sendEvent: async (event) => {
@@ -80,6 +90,7 @@ export class ConnectorRuntime {
                 }
                 stopped = true;
                 unsubscribeForwarding();
+                stopSessionActivityMonitor();
                 stopHeartbeat();
                 await this.backendClient.disconnect("connector.stop");
             }
@@ -100,6 +111,17 @@ export class ConnectorRuntime {
             const message = error instanceof Error ? error.message : String(error);
             console.warn(`Failed to load synced agents from OpenClaw config: ${message}`);
             return [];
+        }
+    }
+    async initializeSessionActivity(monitor, tracker) {
+        try {
+            const activities = await monitor.refresh();
+            tracker.updateOpenClawSessionActivities(activities);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`Failed to load OpenClaw session activity: ${message}`);
+            tracker.updateOpenClawSessionActivities([]);
         }
     }
 }
