@@ -100,7 +100,7 @@ export class ConnectorRuntime {
         return [
             "Official backend WebSocket/gRPC transport is not implemented in this repo yet.",
             "Host binding currently stores connector metadata locally in plain JSON.",
-            "Runtime worker still uses a mock OpenClaw streaming bridge for demo flows."
+            "Runtime worker bridges forwarded requests to OpenClaw via Gateway/OpenResponses."
         ];
     }
     async loadSyncedAgentIds() {

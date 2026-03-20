@@ -361,9 +361,9 @@ function createRuntimeForMockLifecycle(
     timeoutMs: options.timeoutMs,
   });
   const backendClient = new BackendClient({ transport });
-  const runtimeWorker = overrides.forceGatewayOnline
-    ? new RuntimeWorker({
-        gatewayProbe: async () => ({
+  const runtimeWorker = new RuntimeWorker({
+    gatewayProbe: overrides.forceGatewayOnline
+      ? async () => ({
           status: "online",
           ok: true,
           detail: "Demo gateway probe bypass enabled.",
@@ -371,14 +371,18 @@ function createRuntimeForMockLifecycle(
           endpoint: "demo://gateway",
           latencyMs: 0
         })
-      })
-    : undefined;
+      : () => gatewayDetector.detect(),
+    openClaw: {
+      gatewayUrl: options.gateway,
+      gatewayToken: options.token
+    }
+  });
   const runtime = new ConnectorRuntime({
     hostRegistry: registry,
     gatewayDetector,
     backendClient,
     heartbeatManager: new HeartbeatManager({ intervalMs: options.heartbeatMs }),
-    ...(runtimeWorker ? { runtimeWorker } : {})
+    runtimeWorker
   });
 
   return { transport, runtime, registry };
@@ -459,7 +463,14 @@ async function createRuntimeForWsLifecycle(
     hostRegistry: registry,
     gatewayDetector,
     backendClient: new BackendClient({ transport }),
-    heartbeatManager: new HeartbeatManager({ intervalMs: options.heartbeatMs })
+    heartbeatManager: new HeartbeatManager({ intervalMs: options.heartbeatMs }),
+    runtimeWorker: new RuntimeWorker({
+      gatewayProbe: () => gatewayDetector.detect(),
+      openClaw: {
+        gatewayUrl: options.gateway,
+        gatewayToken: options.token
+      }
+    })
   });
 
   return { transport, runtime, registry };

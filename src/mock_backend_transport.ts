@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 import type {
+  AgentFilesGetRequestPayload,
+  AgentFilesListRequestPayload,
+  AgentFilesOperation,
+  AgentFilesSetRequestPayload,
   BackendConnectionContext,
   BackendTransport,
   ConnectorEvent,
+  ForwardedFileRequest,
+  ForwardedFileRequestHandler,
   ForwardedRequest,
   ForwardedRequestHandler
 } from "./backend_client.js";
@@ -35,10 +41,83 @@ export function createMockForwardedRequest(input: {
   };
 }
 
+type MockForwardedFileRequestInput =
+  | {
+      hostId: string;
+      userId: string;
+      operation: "agents.files.list";
+      payload?: AgentFilesListRequestPayload;
+      requestId?: string;
+      createdAt?: string;
+    }
+  | {
+      hostId: string;
+      userId: string;
+      operation: "agents.files.get";
+      payload: AgentFilesGetRequestPayload;
+      requestId?: string;
+      createdAt?: string;
+    }
+  | {
+      hostId: string;
+      userId: string;
+      operation: "agents.files.set";
+      payload: AgentFilesSetRequestPayload;
+      requestId?: string;
+      createdAt?: string;
+    };
+
+function normalizeFilePayload(
+  operation: AgentFilesOperation,
+  payload: AgentFilesListRequestPayload | AgentFilesGetRequestPayload | AgentFilesSetRequestPayload | undefined
+): AgentFilesListRequestPayload | AgentFilesGetRequestPayload | AgentFilesSetRequestPayload {
+  if (operation === "agents.files.list") {
+    return payload ?? {};
+  }
+  if (operation === "agents.files.get") {
+    return payload ?? { bridgePath: "" };
+  }
+  return payload ?? { bridgePath: "", content: "" };
+}
+
+export function createMockForwardedFileRequest(input: MockForwardedFileRequestInput): ForwardedFileRequest {
+  const base = {
+    requestId: input.requestId ?? `file_req_${randomUUID()}`,
+    hostId: input.hostId,
+    userId: input.userId,
+    createdAt: input.createdAt ?? new Date().toISOString()
+  };
+
+  if (input.operation === "agents.files.list") {
+    return {
+      ...base,
+      operation: input.operation,
+      payload: normalizeFilePayload(input.operation, input.payload) as AgentFilesListRequestPayload
+    };
+  }
+
+  if (input.operation === "agents.files.get") {
+    return {
+      ...base,
+      operation: input.operation,
+      payload: normalizeFilePayload(input.operation, input.payload) as AgentFilesGetRequestPayload
+    };
+  }
+
+  return {
+    ...base,
+    operation: input.operation,
+    payload: normalizeFilePayload(input.operation, input.payload) as AgentFilesSetRequestPayload
+  };
+}
+
 export class MockBackendTransport implements BackendTransport {
   readonly name = "mock";
 
   private forwardedRequestHandler: ForwardedRequestHandler = async () => {
+    return;
+  };
+  private forwardedFileRequestHandler: ForwardedFileRequestHandler = async () => {
     return;
   };
   private connected = false;
@@ -48,6 +127,10 @@ export class MockBackendTransport implements BackendTransport {
 
   onForwardedRequest(handler: ForwardedRequestHandler): void {
     this.forwardedRequestHandler = handler;
+  }
+
+  onForwardedFileRequest(handler: ForwardedFileRequestHandler): void {
+    this.forwardedFileRequestHandler = handler;
   }
 
   async connect(context: BackendConnectionContext): Promise<void> {
@@ -91,6 +174,13 @@ export class MockBackendTransport implements BackendTransport {
       throw new Error("Mock backend transport is not connected.");
     }
     await this.forwardedRequestHandler(request);
+  }
+
+  async forwardFileRequest(request: ForwardedFileRequest): Promise<void> {
+    if (!this.connected) {
+      throw new Error("Mock backend transport is not connected.");
+    }
+    await this.forwardedFileRequestHandler(request);
   }
 
   waitForEvent(predicate: (event: ConnectorEvent) => boolean, timeoutMs = 3_000): Promise<ConnectorEvent> {
