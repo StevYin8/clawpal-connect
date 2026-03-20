@@ -10,6 +10,12 @@ export interface OpenClawBinding {
   };
 }
 
+export interface OpenClawAgentEntry {
+  id?: string;
+  default?: boolean;
+  workspace?: string;
+}
+
 export interface OpenClawConfig {
   bindings: OpenClawBinding[];
   gateway?: {
@@ -19,6 +25,7 @@ export interface OpenClawConfig {
     };
   };
   agents?: {
+    list?: OpenClawAgentEntry[];
     defaults?: {
       model?: {
         primary?: string;
@@ -43,6 +50,14 @@ export interface AgentInfo {
   channel?: string | undefined;
 }
 
+export type OpenClawAgentResolutionMode = "explicit" | "bindings-only" | "unconfigured";
+
+export interface OpenClawAgentResolution {
+  agentId: string;
+  mode: OpenClawAgentResolutionMode;
+  binding?: OpenClawBinding;
+}
+
 const OPENCLAW_CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
 
 export async function readOpenClawConfig(): Promise<OpenClawConfig | null> {
@@ -65,6 +80,84 @@ function parseOpenClawConfig(content: string): OpenClawConfig {
 
 export async function writeOpenClawConfig(config: OpenClawConfig): Promise<void> {
   await writeFile(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+}
+
+function normalizeAgentId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9#@._+-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+
+  return normalized || undefined;
+}
+
+function listExplicitAgentIds(config: OpenClawConfig): Set<string> {
+  const explicitAgentIds = new Set<string>();
+
+  const entries = config.agents?.list;
+  if (!Array.isArray(entries)) {
+    return explicitAgentIds;
+  }
+
+  for (const entry of entries) {
+    const agentId = normalizeAgentId(entry?.id);
+    if (!agentId) {
+      continue;
+    }
+    explicitAgentIds.add(agentId);
+  }
+
+  return explicitAgentIds;
+}
+
+function findRouteBindingByAgentId(config: OpenClawConfig, agentId: string): OpenClawBinding | undefined {
+  for (const binding of config.bindings ?? []) {
+    const normalizedBindingAgentId = normalizeAgentId(binding.agentId);
+    if (!normalizedBindingAgentId || normalizedBindingAgentId !== agentId) {
+      continue;
+    }
+    return binding;
+  }
+  return undefined;
+}
+
+export function resolveOpenClawAgentResolution(config: OpenClawConfig, agentId: string): OpenClawAgentResolution {
+  const normalizedAgentId = normalizeAgentId(agentId) ?? "";
+  if (!normalizedAgentId) {
+    return {
+      agentId: normalizedAgentId,
+      mode: "unconfigured"
+    };
+  }
+
+  const explicitAgentIds = listExplicitAgentIds(config);
+  if (explicitAgentIds.has(normalizedAgentId)) {
+    return {
+      agentId: normalizedAgentId,
+      mode: "explicit"
+    };
+  }
+
+  const binding = findRouteBindingByAgentId(config, normalizedAgentId);
+  if (binding) {
+    return {
+      agentId: normalizedAgentId,
+      mode: "bindings-only",
+      binding
+    };
+  }
+
+  return {
+    agentId: normalizedAgentId,
+    mode: "unconfigured"
+  };
 }
 
 export function extractAgentsFromConfig(config: OpenClawConfig): AgentInfo[] {

@@ -21,6 +21,72 @@ function parseOpenClawConfig(content) {
 export async function writeOpenClawConfig(config) {
     await writeFile(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
+function normalizeAgentId(value) {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    const normalized = value
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "-")
+        .replace(/[^a-z0-9#@._+-]+/g, "-")
+        .replace(/-{2,}/g, "-")
+        .replace(/^[-.]+|[-.]+$/g, "");
+    return normalized || undefined;
+}
+function listExplicitAgentIds(config) {
+    const explicitAgentIds = new Set();
+    const entries = config.agents?.list;
+    if (!Array.isArray(entries)) {
+        return explicitAgentIds;
+    }
+    for (const entry of entries) {
+        const agentId = normalizeAgentId(entry?.id);
+        if (!agentId) {
+            continue;
+        }
+        explicitAgentIds.add(agentId);
+    }
+    return explicitAgentIds;
+}
+function findRouteBindingByAgentId(config, agentId) {
+    for (const binding of config.bindings ?? []) {
+        const normalizedBindingAgentId = normalizeAgentId(binding.agentId);
+        if (!normalizedBindingAgentId || normalizedBindingAgentId !== agentId) {
+            continue;
+        }
+        return binding;
+    }
+    return undefined;
+}
+export function resolveOpenClawAgentResolution(config, agentId) {
+    const normalizedAgentId = normalizeAgentId(agentId) ?? "";
+    if (!normalizedAgentId) {
+        return {
+            agentId: normalizedAgentId,
+            mode: "unconfigured"
+        };
+    }
+    const explicitAgentIds = listExplicitAgentIds(config);
+    if (explicitAgentIds.has(normalizedAgentId)) {
+        return {
+            agentId: normalizedAgentId,
+            mode: "explicit"
+        };
+    }
+    const binding = findRouteBindingByAgentId(config, normalizedAgentId);
+    if (binding) {
+        return {
+            agentId: normalizedAgentId,
+            mode: "bindings-only",
+            binding
+        };
+    }
+    return {
+        agentId: normalizedAgentId,
+        mode: "unconfigured"
+    };
+}
 export function extractAgentsFromConfig(config) {
     const agents = [];
     if (!config.bindings)

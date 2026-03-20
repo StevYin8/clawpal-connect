@@ -1,6 +1,7 @@
 import { type ChildProcessWithoutNullStreams, type SpawnOptions } from "node:child_process";
 import type { ConnectorEventInput, ForwardedRequest } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
+import { type OpenClawConfig } from "./openclaw_config.js";
 export type RuntimeEventEmitter = (event: ConnectorEventInput) => Promise<void>;
 export type RequestExecutor = (request: ForwardedRequest) => AsyncIterable<string>;
 type SpawnOpenClawProcess = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcessWithoutNullStreams;
@@ -10,6 +11,7 @@ export interface OpenClawRequestExecutorOptions {
     openClawBinary?: string;
     fetchImpl?: typeof fetch;
     spawnImpl?: SpawnOpenClawProcess;
+    readOpenClawConfigImpl?: () => Promise<OpenClawConfig | null>;
     env?: NodeJS.ProcessEnv;
 }
 export interface RuntimeWorkerOptions {

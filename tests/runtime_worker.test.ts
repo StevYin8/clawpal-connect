@@ -167,6 +167,67 @@ describe("createOpenClawRequestExecutor", () => {
     expect(chunks).toEqual(["hello ", "openclaw"]);
   });
 
+  test("keeps explicit-agent requests on the OpenResponses path", async () => {
+    let seenModel = "";
+    let seenSessionKey = "";
+    const executor = createOpenClawRequestExecutor({
+      gatewayUrl: "http://127.0.0.1:18789",
+      readOpenClawConfigImpl: async () => ({
+        bindings: [
+          {
+            agentId: "agent-a",
+            match: { channel: "discord" }
+          }
+        ],
+        agents: {
+          list: [{ id: "agent-a", default: true }]
+        }
+      }),
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        seenModel = String(body.model ?? "");
+        const headers = init?.headers as Record<string, string> | undefined;
+        seenSessionKey = String(headers?.["x-openclaw-session-key"] ?? "");
+        return new Response(
+          [
+            "event: response.output_text.delta",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"explicit path\"}",
+            "",
+            "data: [DONE]",
+            ""
+          ].join("\n"),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "text/event-stream"
+            }
+          }
+        );
+      },
+      spawnImpl: () => {
+        throw new Error("gateway fallback should not run for explicit OpenResponses success");
+      }
+    });
+
+    const request = createMockForwardedRequest({
+      hostId: "host-1",
+      userId: "user-1",
+      agentId: "agent-a",
+      conversationId: "conv-1",
+      requestId: "req-explicit",
+      message: "test explicit"
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of executor(request)) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["explicit path"]);
+    expect(seenModel).toBe("openclaw:agent-a");
+    expect(seenSessionKey).toBe("relay:host-1:user-1:conv-1");
+  });
+
   test("falls back to OpenClaw gateway RPC when OpenResponses endpoint is unavailable", async () => {
     let command = "";
     let args: string[] = [];
@@ -243,5 +304,89 @@ describe("createOpenClawRequestExecutor", () => {
     expect(parsedParams.idempotencyKey).toBe("req-fallback");
     expect(parsedParams.sessionKey).toBe("relay:host-1:user-1:conv-1");
     expect(parsedParams.agentId).toBe("agent-a");
+  });
+
+  test("uses bindings-only compatibility mode when agent exists only in bindings", async () => {
+    let fetchCalls = 0;
+    let args: string[] = [];
+
+    const executor = createOpenClawRequestExecutor({
+      gatewayUrl: "http://127.0.0.1:18789",
+      readOpenClawConfigImpl: async () => ({
+        bindings: [
+          {
+            agentId: "claw-tax",
+            match: {
+              channel: "dingtalk",
+              accountId: "acct-1"
+            }
+          }
+        ],
+        agents: {
+          defaults: {
+            model: {
+              primary: "gpt-4o"
+            }
+          }
+        }
+      }),
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        throw new Error("OpenResponses should be skipped for bindings-only compatibility mode");
+      },
+      spawnImpl: (_command, nextArgs) => {
+        args = [...nextArgs];
+
+        const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        (child as unknown as { stdout: PassThrough }).stdout = stdout;
+        (child as unknown as { stderr: PassThrough }).stderr = stderr;
+
+        process.nextTick(() => {
+          stdout.write(
+            JSON.stringify({
+              runId: "req-bindings-only",
+              status: "ok",
+              result: {
+                payloads: [{ text: "bindings-only output" }]
+              }
+            })
+          );
+          stdout.end();
+          stderr.end();
+          child.emit("close", 0, null);
+        });
+
+        return child;
+      }
+    });
+
+    const request = createMockForwardedRequest({
+      hostId: "host-1",
+      userId: "user-1",
+      agentId: "claw-tax",
+      conversationId: "conv-1",
+      requestId: "req-bindings-only",
+      message: "handle tax question"
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of executor(request)) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["bindings-only output"]);
+    expect(fetchCalls).toBe(0);
+
+    const paramsIndex = args.indexOf("--params");
+    const rawParams = paramsIndex >= 0 ? args[paramsIndex + 1] : undefined;
+    expect(rawParams).toBeTruthy();
+    const parsedParams = JSON.parse(rawParams ?? "{}") as Record<string, unknown>;
+    expect(parsedParams.idempotencyKey).toBe("req-bindings-only");
+    expect(parsedParams.sessionKey).toBe("agent:claw-tax:relay:host-1:user-1:conv-1");
+    expect(parsedParams.channel).toBe("dingtalk");
+    expect(parsedParams.accountId).toBe("acct-1");
+    expect(parsedParams.agentId).toBeUndefined();
   });
 });
