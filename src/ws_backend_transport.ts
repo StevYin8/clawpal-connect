@@ -2,9 +2,13 @@ import WebSocket, { Data } from "ws";
 import { randomUUID } from "node:crypto";
 
 import type {
+  AgentFilesOperation,
+  AgentFilesSetRequestPayload,
   BackendConnectionContext,
   BackendTransport,
   ConnectorEvent,
+  ForwardedFileRequest,
+  ForwardedFileRequestHandler,
   ForwardedRequest,
   ForwardedRequestHandler,
   HostConnectionStatus
@@ -15,6 +19,35 @@ interface EventWaiter {
   resolve: (event: ConnectorEvent) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
+}
+
+const AGENT_FILES_OPERATIONS: readonly AgentFilesOperation[] = [
+  "agents.files.list",
+  "agents.files.get",
+  "agents.files.set"
+];
+
+function isAgentFilesOperation(value: unknown): value is AgentFilesOperation {
+  return typeof value === "string" && AGENT_FILES_OPERATIONS.includes(value as AgentFilesOperation);
+}
+
+function readOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized ? normalized : undefined;
+}
+
+function readRawString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
 }
 
 export function resolveRelayWsBaseUrl(backendUrl: string): string {
@@ -49,6 +82,7 @@ export class WsBackendTransport implements BackendTransport {
   private context: BackendConnectionContext | null = null;
   private connected = false;
   private forwardedRequestHandler: ForwardedRequestHandler = async () => {};
+  private forwardedFileRequestHandler: ForwardedFileRequestHandler = async () => {};
   private readonly sentEvents: ConnectorEvent[] = [];
   private readonly waiters: EventWaiter[] = [];
   private reconnectAttempts = 0;
@@ -63,6 +97,10 @@ export class WsBackendTransport implements BackendTransport {
 
   onForwardedRequest(handler: ForwardedRequestHandler): void {
     this.forwardedRequestHandler = handler;
+  }
+
+  onForwardedFileRequest(handler: ForwardedFileRequestHandler): void {
+    this.forwardedFileRequestHandler = handler;
   }
 
   async connect(context: BackendConnectionContext): Promise<void> {
@@ -201,6 +239,7 @@ export class WsBackendTransport implements BackendTransport {
         break;
       }
 
+      case "relay.forward_request":
       case "forwarded.request": {
         const request = payload.request as Record<string, unknown>;
         const forwardedRequest: ForwardedRequest = {
@@ -216,9 +255,85 @@ export class WsBackendTransport implements BackendTransport {
         break;
       }
 
+      case "relay.forward_file_request": {
+        const forwardedFileRequest = this.parseForwardedFileRequest(payload);
+        if (!forwardedFileRequest) {
+          console.log("[ws] Invalid relay.forward_file_request payload; skipping.");
+          break;
+        }
+        this.forwardedFileRequestHandler(forwardedFileRequest);
+        break;
+      }
+
       default:
         console.log(`[ws] Unknown message type: ${type}`);
     }
+  }
+
+  private parseForwardedFileRequest(payload: Record<string, unknown>): ForwardedFileRequest | undefined {
+    const request = asRecord(payload.request);
+    if (!request) {
+      return undefined;
+    }
+
+    const operation = request.operation;
+    if (!isAgentFilesOperation(operation)) {
+      return undefined;
+    }
+
+    const requestId = readOptionalString(request.requestId) ?? randomUUID();
+    const hostId = readOptionalString(request.hostId) ?? "";
+    const userId = readOptionalString(request.userId) ?? "";
+    const createdAt = readOptionalString(request.createdAt) ?? new Date().toISOString();
+    const payloadRecord = asRecord(request.payload) ?? {};
+
+    if (operation === "agents.files.list") {
+      const agentId = readOptionalString(payloadRecord.agentId);
+      return {
+        requestId,
+        hostId,
+        userId,
+        operation,
+        payload: agentId ? { agentId } : {},
+        createdAt
+      };
+    }
+
+    if (operation === "agents.files.get") {
+      const bridgePath = readRawString(payloadRecord.bridgePath) ?? "";
+      const agentId = readOptionalString(payloadRecord.agentId);
+      return {
+        requestId,
+        hostId,
+        userId,
+        operation,
+        payload: {
+          bridgePath,
+          ...(agentId ? { agentId } : {})
+        },
+        createdAt
+      };
+    }
+
+    const bridgePath = readRawString(payloadRecord.bridgePath) ?? "";
+    const content = readRawString(payloadRecord.content) ?? "";
+    const agentId = readOptionalString(payloadRecord.agentId);
+    const expectedRevision = readOptionalString(payloadRecord.expectedRevision);
+    const setPayload: AgentFilesSetRequestPayload = {
+      bridgePath,
+      content,
+      ...(agentId ? { agentId } : {}),
+      ...(expectedRevision ? { expectedRevision } : {})
+    };
+
+    return {
+      requestId,
+      hostId,
+      userId,
+      operation,
+      payload: setPayload,
+      createdAt
+    };
   }
 
   async disconnect(reason?: string): Promise<void> {

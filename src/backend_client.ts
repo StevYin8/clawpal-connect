@@ -17,6 +17,48 @@ export interface ForwardedRequest {
   createdAt: string;
 }
 
+export type AgentFilesOperation = "agents.files.list" | "agents.files.get" | "agents.files.set";
+
+export interface AgentFilesListRequestPayload {
+  agentId?: string;
+}
+
+export interface AgentFilesGetRequestPayload {
+  agentId?: string;
+  bridgePath: string;
+}
+
+export interface AgentFilesSetRequestPayload {
+  agentId?: string;
+  bridgePath: string;
+  content: string;
+  expectedRevision?: string;
+}
+
+interface ForwardedFileRequestBase {
+  requestId: string;
+  hostId: string;
+  userId: string;
+  createdAt: string;
+}
+
+export interface ForwardedFileListRequest extends ForwardedFileRequestBase {
+  operation: "agents.files.list";
+  payload: AgentFilesListRequestPayload;
+}
+
+export interface ForwardedFileGetRequest extends ForwardedFileRequestBase {
+  operation: "agents.files.get";
+  payload: AgentFilesGetRequestPayload;
+}
+
+export interface ForwardedFileSetRequest extends ForwardedFileRequestBase {
+  operation: "agents.files.set";
+  payload: AgentFilesSetRequestPayload;
+}
+
+export type ForwardedFileRequest = ForwardedFileListRequest | ForwardedFileGetRequest | ForwardedFileSetRequest;
+
 export interface HostStatusEvent {
   type: "host.status";
   hostId: string;
@@ -63,6 +105,34 @@ export interface MessageErrorEvent {
   at: string;
 }
 
+export interface AgentFilesResponseError {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export interface AgentFilesResponseOkEvent {
+  type: "agents.files.response";
+  requestId: string;
+  hostId: string;
+  operation: AgentFilesOperation;
+  ok: true;
+  result: unknown;
+  at: string;
+}
+
+export interface AgentFilesResponseErrEvent {
+  type: "agents.files.response";
+  requestId: string;
+  hostId: string;
+  operation: AgentFilesOperation;
+  ok: false;
+  error: AgentFilesResponseError;
+  at: string;
+}
+
+export type AgentFilesResponseEvent = AgentFilesResponseOkEvent | AgentFilesResponseErrEvent;
+
 export type AgentDisplayStatus = "working" | "idle" | "waiting" | "error" | "offline" | "paused";
 
 export interface AgentRuntimeStatusEvent {
@@ -85,7 +155,8 @@ export type ConnectorEvent =
   | MessageDeltaEvent
   | MessageDoneEvent
   | MessageErrorEvent
-  | AgentRuntimeStatusEvent;
+  | AgentRuntimeStatusEvent
+  | AgentFilesResponseEvent;
 
 export type ConnectorEventInput =
   | Omit<HostStatusEvent, "at">
@@ -93,15 +164,19 @@ export type ConnectorEventInput =
   | Omit<MessageDeltaEvent, "at">
   | Omit<MessageDoneEvent, "at">
   | Omit<MessageErrorEvent, "at">
-  | Omit<AgentRuntimeStatusEvent, "at">;
+  | Omit<AgentRuntimeStatusEvent, "at">
+  | Omit<AgentFilesResponseOkEvent, "at">
+  | Omit<AgentFilesResponseErrEvent, "at">;
 
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
+export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
 
 export interface BackendTransport {
   readonly name: string;
   connect(context: BackendConnectionContext): Promise<void>;
   disconnect(reason?: string): Promise<void>;
   onForwardedRequest(handler: ForwardedRequestHandler): void;
+  onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
   sendEvent(event: ConnectorEvent): Promise<void>;
 }
 
@@ -115,7 +190,8 @@ export class BackendClient {
   private readonly transport: BackendTransport;
   private readonly now: () => Date;
   private readonly onUnhandledRequestError: (error: unknown) => void;
-  private readonly listeners = new Set<ForwardedRequestHandler>();
+  private readonly chatRequestListeners = new Set<ForwardedRequestHandler>();
+  private readonly fileRequestListeners = new Set<ForwardedFileRequestHandler>();
   private connected = false;
 
   constructor(options: BackendClientOptions) {
@@ -133,6 +209,11 @@ export class BackendClient {
         this.onUnhandledRequestError(error);
       });
     });
+    this.transport.onForwardedFileRequest((request) => {
+      void this.dispatchForwardedFileRequest(request).catch((error) => {
+        this.onUnhandledRequestError(error);
+      });
+    });
   }
 
   getTransportName(): string {
@@ -144,9 +225,16 @@ export class BackendClient {
   }
 
   onForwardedRequest(listener: ForwardedRequestHandler): () => void {
-    this.listeners.add(listener);
+    this.chatRequestListeners.add(listener);
     return () => {
-      this.listeners.delete(listener);
+      this.chatRequestListeners.delete(listener);
+    };
+  }
+
+  onForwardedFileRequest(listener: ForwardedFileRequestHandler): () => void {
+    this.fileRequestListeners.add(listener);
+    return () => {
+      this.fileRequestListeners.delete(listener);
     };
   }
 
@@ -179,7 +267,13 @@ export class BackendClient {
   }
 
   private async dispatchForwardedRequest(request: ForwardedRequest): Promise<void> {
-    for (const listener of this.listeners) {
+    for (const listener of this.chatRequestListeners) {
+      await listener(request);
+    }
+  }
+
+  private async dispatchForwardedFileRequest(request: ForwardedFileRequest): Promise<void> {
+    for (const listener of this.fileRequestListeners) {
       await listener(request);
     }
   }

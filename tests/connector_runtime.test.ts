@@ -4,8 +4,20 @@ import { join } from "node:path";
 
 import { describe, expect, test } from "vitest";
 
-import { BackendClient, ConnectorRuntime, GatewayDetector, HeartbeatManager, HostRegistry, RuntimeWorker } from "../src/index.js";
-import { createMockForwardedRequest, MockBackendTransport } from "../src/mock_backend_transport.js";
+import {
+  BackendClient,
+  ConnectorRuntime,
+  GatewayDetector,
+  HeartbeatManager,
+  HostRegistry,
+  OpenClawAgentFileRevisionConflictError,
+  RuntimeWorker
+} from "../src/index.js";
+import {
+  createMockForwardedFileRequest,
+  createMockForwardedRequest,
+  MockBackendTransport
+} from "../src/mock_backend_transport.js";
 import type { GatewayProbeResult } from "../src/gateway_detector.js";
 import type { HeartbeatStartOptions } from "../src/heartbeat_manager.js";
 import type { OpenClawAgentActivity, SessionActivityMonitor } from "../src/openclaw_session_activity_monitor.js";
@@ -224,6 +236,253 @@ describe("ConnectorRuntime", () => {
       expect(startOptions?.statusProvider?.()).toBe("online");
       expect(provider?.currentWorkTitle).toBeUndefined();
       expect(provider?.currentWorkSummary).toBeUndefined();
+    } finally {
+      await running?.stop();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("routes forwarded file requests through file bridge service and emits agents.files.response", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "clawpal-connector-runtime-"));
+    const registryPath = join(tempDir, "host-registry.json");
+    const registry = new HostRegistry({ filePath: registryPath });
+    await registry.bindHost({
+      hostId: "host-1",
+      userId: "user-1",
+      hostName: "Host 1",
+      backendUrl: "https://relay.example"
+    });
+
+    const transport = new MockBackendTransport();
+    const backendClient = new BackendClient({ transport });
+    const gatewayDetector = new GatewayDetector({
+      baseUrl: "http://127.0.0.1:18789",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+    });
+
+    let runtimeWorkerCalls = 0;
+    const runtimeWorker = new RuntimeWorker({
+      gatewayProbe: async (): Promise<GatewayProbeResult> => ({
+        status: "online",
+        ok: true,
+        detail: "ok",
+        checkedAt: "2026-03-20T00:00:00.000Z",
+        endpoint: "demo://gateway",
+        latencyMs: 0
+      }),
+      executeRequest: async function* () {
+        runtimeWorkerCalls += 1;
+        yield "chat path";
+      }
+    });
+
+    const fileBridgeService = {
+      async listAgentFiles(_options: { agentId?: string }) {
+        return {
+          agentId: "main",
+          stateDir: "/tmp/.openclaw",
+          configPath: "/tmp/.openclaw/openclaw.json",
+          workspaceDir: "/tmp/.openclaw/workspace",
+          files: []
+        };
+      },
+      async readAgentFile(input: { agentId?: string; bridgePath: string }) {
+        return {
+          file: {
+            bridgePath: input.bridgePath,
+            absolutePath: `/tmp/.openclaw/workspace/${input.bridgePath}`,
+            domain: "workspace",
+            category: "soul",
+            exists: true,
+            writable: true
+          },
+          content: "# Soul",
+          revision: "rev-1"
+        };
+      },
+      async writeAgentFile(input: { agentId?: string; bridgePath: string; content: string }) {
+        return {
+          file: {
+            bridgePath: input.bridgePath,
+            absolutePath: `/tmp/.openclaw/workspace/${input.bridgePath}`,
+            domain: "workspace",
+            category: "soul",
+            exists: true,
+            writable: true
+          },
+          revision: `rev-${input.content.length}`
+        };
+      }
+    };
+
+    const runtime = new ConnectorRuntime({
+      hostRegistry: registry,
+      gatewayDetector,
+      backendClient,
+      runtimeWorker,
+      fileBridgeService
+    });
+
+    let running: Awaited<ReturnType<ConnectorRuntime["start"]>> | undefined;
+    try {
+      running = await runtime.start();
+
+      await transport.forwardFileRequest(
+        createMockForwardedFileRequest({
+          hostId: "host-1",
+          userId: "user-1",
+          requestId: "req-file-1",
+          operation: "agents.files.get",
+          payload: {
+            agentId: "main",
+            bridgePath: "workspace/SOUL.md"
+          }
+        })
+      );
+
+      await waitForCondition(() =>
+        transport
+          .getSentEvents()
+          .some((event) => event.type === "agents.files.response" && event.requestId === "req-file-1")
+      );
+
+      const response = transport
+        .getSentEvents()
+        .find((event) => event.type === "agents.files.response" && event.requestId === "req-file-1");
+      expect(response?.type).toBe("agents.files.response");
+      if (response?.type === "agents.files.response") {
+        expect(response.operation).toBe("agents.files.get");
+        expect(response.ok).toBe(true);
+        if (response.ok) {
+          expect(response.result).toEqual({
+            file: {
+              bridgePath: "workspace/SOUL.md",
+              absolutePath: "/tmp/.openclaw/workspace/workspace/SOUL.md",
+              domain: "workspace",
+              category: "soul",
+              exists: true,
+              writable: true
+            },
+            content: "# Soul",
+            revision: "rev-1"
+          });
+        }
+      }
+
+      expect(runtimeWorkerCalls).toBe(0);
+    } finally {
+      await running?.stop();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("maps file bridge revision conflicts to agents.files.response conflict errors", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "clawpal-connector-runtime-"));
+    const registryPath = join(tempDir, "host-registry.json");
+    const registry = new HostRegistry({ filePath: registryPath });
+    await registry.bindHost({
+      hostId: "host-1",
+      userId: "user-1",
+      hostName: "Host 1",
+      backendUrl: "https://relay.example"
+    });
+
+    const transport = new MockBackendTransport();
+    const backendClient = new BackendClient({ transport });
+    const gatewayDetector = new GatewayDetector({
+      baseUrl: "http://127.0.0.1:18789",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+    });
+
+    const fileBridgeService = {
+      async listAgentFiles(_options: { agentId?: string }) {
+        return {
+          agentId: "main",
+          stateDir: "/tmp/.openclaw",
+          configPath: "/tmp/.openclaw/openclaw.json",
+          workspaceDir: "/tmp/.openclaw/workspace",
+          files: []
+        };
+      },
+      async readAgentFile(input: { agentId?: string; bridgePath: string }) {
+        return {
+          file: {
+            bridgePath: input.bridgePath,
+            absolutePath: `/tmp/.openclaw/workspace/${input.bridgePath}`,
+            domain: "workspace",
+            category: "memory",
+            exists: true,
+            writable: true
+          },
+          content: "seed",
+          revision: "rev-seed"
+        };
+      },
+      async writeAgentFile(_input: { agentId?: string; bridgePath: string; content: string; expectedRevision?: string }) {
+        throw new OpenClawAgentFileRevisionConflictError({
+          bridgePath: "workspace/MEMORY.md",
+          expectedRevision: "rev-old",
+          actualRevision: "rev-new"
+        });
+      }
+    };
+
+    const runtime = new ConnectorRuntime({
+      hostRegistry: registry,
+      gatewayDetector,
+      backendClient,
+      fileBridgeService
+    });
+
+    let running: Awaited<ReturnType<ConnectorRuntime["start"]>> | undefined;
+    try {
+      running = await runtime.start();
+
+      await transport.forwardFileRequest(
+        createMockForwardedFileRequest({
+          hostId: "host-1",
+          userId: "user-1",
+          requestId: "req-file-conflict",
+          operation: "agents.files.set",
+          payload: {
+            agentId: "main",
+            bridgePath: "workspace/MEMORY.md",
+            content: "v2",
+            expectedRevision: "rev-old"
+          }
+        })
+      );
+
+      await waitForCondition(() =>
+        transport
+          .getSentEvents()
+          .some((event) => event.type === "agents.files.response" && event.requestId === "req-file-conflict")
+      );
+
+      const response = transport
+        .getSentEvents()
+        .find((event) => event.type === "agents.files.response" && event.requestId === "req-file-conflict");
+      expect(response?.type).toBe("agents.files.response");
+      if (response?.type === "agents.files.response") {
+        expect(response.operation).toBe("agents.files.set");
+        expect(response.ok).toBe(false);
+        if (!response.ok) {
+          expect(response.error.code).toBe("conflict");
+          expect(response.error.details).toEqual({
+            bridgePath: "workspace/MEMORY.md",
+            expectedRevision: "rev-old",
+            actualRevision: "rev-new"
+          });
+        }
+      }
     } finally {
       await running?.stop();
       await rm(tempDir, { recursive: true, force: true });

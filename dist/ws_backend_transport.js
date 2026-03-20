@@ -33,24 +33,61 @@ export class WsBackendTransport {
     maxReconnectAttempts = Number.POSITIVE_INFINITY;
     reconnectDelayMs = 1000;
     maxReconnectDelayMs = 30000;
+    reconnectTimer = null;
+    reconnecting = false;
+    intentionalDisconnect = false;
+    socketGeneration = 0;
     _onClose;
     onForwardedRequest(handler) {
         this.forwardedRequestHandler = handler;
     }
     async connect(context) {
         this.context = context;
+        this.intentionalDisconnect = false;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        const existing = this.ws;
+        if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+            return;
+        }
         const wsUrl = `${resolveRelayWsBaseUrl(context.backendUrl)}/ws/connector?hostId=${encodeURIComponent(context.hostId)}&userId=${encodeURIComponent(context.userId)}`;
+        const generation = ++this.socketGeneration;
         return new Promise((resolve, reject) => {
             try {
                 console.log(`[ws] Connecting to ${wsUrl}...`);
-                this.ws = new WebSocket(wsUrl);
-                this.ws.on("open", () => {
+                const ws = new WebSocket(wsUrl);
+                this.ws = ws;
+                let settled = false;
+                const timeout = setTimeout(() => {
+                    if (settled || this.ws !== ws || this.connected) {
+                        return;
+                    }
+                    settled = true;
+                    try {
+                        ws.close();
+                    }
+                    catch { }
+                    reject(new Error("Connection timeout"));
+                }, 10000);
+                ws.on("open", () => {
+                    if (this.ws !== ws || generation !== this.socketGeneration) {
+                        try {
+                            ws.close(1000, "superseded");
+                        }
+                        catch { }
+                        return;
+                    }
+                    settled = true;
+                    clearTimeout(timeout);
                     console.log("[ws] Connected to relay server");
                     this.connected = true;
+                    this.reconnecting = false;
                     this.reconnectAttempts = 0;
                     resolve();
                 });
-                this.ws.on("message", (data) => {
+                ws.on("message", (data) => {
                     try {
                         const payload = JSON.parse(data.toString());
                         this.handleRelayMessage(payload);
@@ -59,50 +96,63 @@ export class WsBackendTransport {
                         console.error("[ws] Failed to parse relay message:", err);
                     }
                 });
-                this.ws.on("close", (code, reason) => {
-                    console.log(`[ws] Connection closed: code=${code}, reason=${reason.toString()}`);
+                ws.on("close", (code, reason) => {
+                    clearTimeout(timeout);
+                    const reasonText = reason.toString();
+                    console.log(`[ws] Connection closed: code=${code}, reason=${reasonText}`);
+                    if (this.ws !== ws || generation !== this.socketGeneration) {
+                        return;
+                    }
                     this.connected = false;
-                    this._onClose?.(reason.toString());
-                    this.attemptReconnect();
+                    this.ws = null;
+                    this._onClose?.(reasonText);
+                    this.scheduleReconnect();
                 });
-                this.ws.on("error", (err) => {
+                ws.on("error", (err) => {
                     console.error("[ws] WebSocket error:", err.message);
-                    if (!this.connected) {
+                    if (!settled && this.ws === ws && generation === this.socketGeneration) {
+                        settled = true;
+                        clearTimeout(timeout);
                         reject(err);
                     }
                 });
-                // Timeout for initial connection
-                setTimeout(() => {
-                    if (!this.connected) {
-                        this.ws?.close();
-                        reject(new Error("Connection timeout"));
-                    }
-                }, 10000);
             }
             catch (err) {
                 reject(err);
             }
         });
     }
-    async attemptReconnect() {
+    scheduleReconnect() {
+        if (this.intentionalDisconnect) {
+            return;
+        }
         if (!this.context) {
             console.log("[ws] No context for reconnect");
             return;
         }
+        if (this.reconnecting || this.reconnectTimer) {
+            return;
+        }
+        this.reconnecting = true;
         this.reconnectAttempts++;
         const delay = Math.min(this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1), this.maxReconnectDelayMs);
         const maxLabel = Number.isFinite(this.maxReconnectAttempts)
             ? String(this.maxReconnectAttempts)
             : '∞';
         console.log(`[ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${maxLabel})`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        try {
-            await this.connect(this.context);
-        }
-        catch (err) {
-            console.error("[ws] Reconnect failed:", err);
-            void this.attemptReconnect();
-        }
+        this.reconnectTimer = setTimeout(async () => {
+            this.reconnectTimer = null;
+            try {
+                await this.connect(this.context);
+            }
+            catch (err) {
+                console.error("[ws] Reconnect failed:", err);
+                this.reconnecting = false;
+                this.scheduleReconnect();
+                return;
+            }
+            this.reconnecting = false;
+        }, delay);
     }
     handleRelayMessage(payload) {
         const type = payload.type;
@@ -119,6 +169,7 @@ export class WsBackendTransport {
                 this.resolveWaiters(event);
                 break;
             }
+            case "relay.forward_request":
             case "forwarded.request": {
                 const request = payload.request;
                 const forwardedRequest = {
@@ -139,11 +190,17 @@ export class WsBackendTransport {
     }
     async disconnect(reason) {
         this.maxReconnectAttempts = 0; // Prevent reconnect on intentional disconnect
+        this.intentionalDisconnect = true;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         if (this.ws) {
             this.ws.close(1000, reason ?? "Client disconnect");
             this.ws = null;
         }
         this.connected = false;
+        this.reconnecting = false;
         this.context = null;
         for (const waiter of this.waiters) {
             clearTimeout(waiter.timeout);

@@ -15,10 +15,14 @@ export declare class WsBackendTransport implements BackendTransport {
     private maxReconnectAttempts;
     private reconnectDelayMs;
     private maxReconnectDelayMs;
+    private reconnectTimer;
+    private reconnecting;
+    private intentionalDisconnect;
+    private socketGeneration;
     private _onClose?;
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     connect(context: BackendConnectionContext): Promise<void>;
-    private attemptReconnect;
+    private scheduleReconnect;
     private handleRelayMessage;
     disconnect(reason?: string): Promise<void>;
     sendEvent(event: ConnectorEvent): Promise<void>;
