@@ -5,6 +5,11 @@ export interface OpenClawBinding {
         accountId?: string;
     };
 }
+export interface OpenClawAgentEntry {
+    id?: string;
+    default?: boolean;
+    workspace?: string;
+}
 export interface OpenClawConfig {
     bindings: OpenClawBinding[];
     gateway?: {
@@ -14,6 +19,7 @@ export interface OpenClawConfig {
         };
     };
     agents?: {
+        list?: OpenClawAgentEntry[];
         defaults?: {
             model?: {
                 primary?: string;
@@ -36,8 +42,15 @@ export interface AgentInfo {
     model: string;
     channel?: string | undefined;
 }
+export type OpenClawAgentResolutionMode = "explicit" | "bindings-only" | "unconfigured";
+export interface OpenClawAgentResolution {
+    agentId: string;
+    mode: OpenClawAgentResolutionMode;
+    binding?: OpenClawBinding;
+}
 export declare function readOpenClawConfig(): Promise<OpenClawConfig | null>;
 export declare function writeOpenClawConfig(config: OpenClawConfig): Promise<void>;
+export declare function resolveOpenClawAgentResolution(config: OpenClawConfig, agentId: string): OpenClawAgentResolution;
 export declare function extractAgentsFromConfig(config: OpenClawConfig): AgentInfo[];
 export interface LocalGatewayDefaults {
     gatewayUrl?: string;

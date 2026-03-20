@@ -2,6 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from "n
 
 import type { ConnectorEventInput, ForwardedRequest } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
+import {
+  readOpenClawConfig,
+  resolveOpenClawAgentResolution,
+  type OpenClawConfig
+} from "./openclaw_config.js";
 
 export type RuntimeEventEmitter = (event: ConnectorEventInput) => Promise<void>;
 
@@ -19,6 +24,7 @@ export interface OpenClawRequestExecutorOptions {
   openClawBinary?: string;
   fetchImpl?: typeof fetch;
   spawnImpl?: SpawnOpenClawProcess;
+  readOpenClawConfigImpl?: () => Promise<OpenClawConfig | null>;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -46,7 +52,17 @@ interface OpenClawBridgeResolvedOptions {
   openClawBinary: string;
   fetchImpl: typeof fetch;
   spawnImpl: SpawnOpenClawProcess;
+  readOpenClawConfigImpl: () => Promise<OpenClawConfig | null>;
   env: NodeJS.ProcessEnv;
+}
+
+interface ResolvedAgentInvocationContext {
+  mode: "explicit" | "bindings-only" | "unconfigured";
+  model: string;
+  sessionKey: string;
+  gatewayAgentId?: string;
+  channel?: string;
+  accountId?: string;
 }
 
 class OpenClawHttpError extends Error {
@@ -117,6 +133,49 @@ function buildOpenResponsesUrl(gatewayUrl: string): string {
 function buildOpenClawSessionKey(request: ForwardedRequest): string {
   const conversationId = normalizeOptionalString(request.conversationId) ?? `request-${request.requestId}`;
   return `relay:${request.hostId}:${request.userId}:${conversationId}`;
+}
+
+function normalizeOpenClawAgentId(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9#@._+-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+
+  return normalized || undefined;
+}
+
+function buildAgentScopedSessionKey(baseSessionKey: string, agentId: string): string {
+  const normalizedAgentId = normalizeOpenClawAgentId(agentId);
+  if (!normalizedAgentId) {
+    return baseSessionKey;
+  }
+
+  const trimmedBase = baseSessionKey.trim();
+  if (/^agent:[^:]+:/i.test(trimmedBase)) {
+    return trimmedBase;
+  }
+
+  return `agent:${normalizedAgentId}:${trimmedBase}`;
+}
+
+function shouldFallbackToGatewayCall(error: OpenClawHttpError): boolean {
+  if (OPENRESPONSES_FALLBACK_HTTP_STATUSES.has(error.status)) {
+    return true;
+  }
+
+  if (error.status !== 400) {
+    return false;
+  }
+
+  const combined = `${error.message}\n${error.bodyText}`.toLowerCase();
+  return combined.includes("unknown agent");
 }
 
 function extractErrorMessageFromJson(text: string): string | undefined {
@@ -247,6 +306,57 @@ function parseJsonFromOutput(stdout: string): unknown {
   throw new Error(`OpenClaw CLI stdout did not contain valid JSON: ${trimmed}`);
 }
 
+async function resolveAgentInvocationContext(
+  request: ForwardedRequest,
+  options: OpenClawBridgeResolvedOptions
+): Promise<ResolvedAgentInvocationContext> {
+  const requestedAgentId = normalizeOpenClawAgentId(request.agentId);
+  const fallbackModelAgentId = requestedAgentId ?? "main";
+  const baseSessionKey = buildOpenClawSessionKey(request);
+
+  if (!requestedAgentId) {
+    return {
+      mode: "unconfigured",
+      model: `openclaw:${fallbackModelAgentId}`,
+      sessionKey: baseSessionKey
+    };
+  }
+
+  let config: OpenClawConfig | null = null;
+  try {
+    config = await options.readOpenClawConfigImpl();
+  } catch {
+    config = null;
+  }
+
+  if (!config) {
+    return {
+      mode: "unconfigured",
+      model: `openclaw:${requestedAgentId}`,
+      sessionKey: baseSessionKey,
+      gatewayAgentId: requestedAgentId
+    };
+  }
+
+  const resolution = resolveOpenClawAgentResolution(config, requestedAgentId);
+  if (resolution.mode === "bindings-only") {
+    return {
+      mode: "bindings-only",
+      model: `openclaw:${resolution.agentId}`,
+      sessionKey: buildAgentScopedSessionKey(baseSessionKey, resolution.agentId),
+      ...(resolution.binding?.match?.channel ? { channel: resolution.binding.match.channel } : {}),
+      ...(resolution.binding?.match?.accountId ? { accountId: resolution.binding.match.accountId } : {})
+    };
+  }
+
+  return {
+    mode: resolution.mode,
+    model: `openclaw:${resolution.agentId || requestedAgentId}`,
+    sessionKey: baseSessionKey,
+    gatewayAgentId: resolution.agentId || requestedAgentId
+  };
+}
+
 function resolveOpenClawBridgeOptions(options: OpenClawRequestExecutorOptions = {}): OpenClawBridgeResolvedOptions {
   const env = options.env ?? process.env;
   const gatewayUrl =
@@ -267,23 +377,30 @@ function resolveOpenClawBridgeOptions(options: OpenClawRequestExecutorOptions = 
       options.spawnImpl ??
       ((command: string, args: readonly string[], spawnOptions: SpawnOptions) =>
         spawn(command, [...args], spawnOptions) as ChildProcessWithoutNullStreams),
+    readOpenClawConfigImpl: options.readOpenClawConfigImpl ?? readOpenClawConfig,
     env
   };
 }
 
 async function runOpenClawGatewayCall(
   request: ForwardedRequest,
+  context: ResolvedAgentInvocationContext,
   options: OpenClawBridgeResolvedOptions
 ): Promise<CliCommandResult> {
   const commandParams: Record<string, unknown> = {
     message: request.message,
     deliver: false,
     idempotencyKey: request.requestId,
-    sessionKey: buildOpenClawSessionKey(request)
+    sessionKey: context.sessionKey
   };
-  const agentId = normalizeOptionalString(request.agentId);
-  if (agentId) {
-    commandParams.agentId = agentId;
+  if (context.gatewayAgentId) {
+    commandParams.agentId = context.gatewayAgentId;
+  }
+  if (context.channel) {
+    commandParams.channel = context.channel;
+  }
+  if (context.accountId) {
+    commandParams.accountId = context.accountId;
   }
 
   const args: string[] = [
@@ -337,10 +454,11 @@ async function runOpenClawGatewayCall(
 
 async function* streamOpenResponses(
   request: ForwardedRequest,
+  context: ResolvedAgentInvocationContext,
   options: OpenClawBridgeResolvedOptions
 ): AsyncGenerator<string> {
   const body = {
-    model: `openclaw:${normalizeOptionalString(request.agentId) ?? "main"}`,
+    model: context.model,
     input: request.message,
     stream: true,
     user: `${request.hostId}:${request.userId}:${normalizeOptionalString(request.conversationId) ?? request.requestId}`
@@ -349,7 +467,7 @@ async function* streamOpenResponses(
   const headers: Record<string, string> = {
     Accept: "text/event-stream, application/json",
     "Content-Type": "application/json",
-    "x-openclaw-session-key": buildOpenClawSessionKey(request)
+    "x-openclaw-session-key": context.sessionKey
   };
   if (options.gatewayToken) {
     headers.Authorization = `Bearer ${options.gatewayToken}`;
@@ -535,16 +653,21 @@ export function createOpenClawRequestExecutor(options: OpenClawRequestExecutorOp
   const resolved = resolveOpenClawBridgeOptions(options);
 
   return async function* openClawRequestExecutor(request: ForwardedRequest): AsyncGenerator<string> {
-    try {
-      yield* streamOpenResponses(request, resolved);
-      return;
-    } catch (error) {
-      if (!(error instanceof OpenClawHttpError) || !OPENRESPONSES_FALLBACK_HTTP_STATUSES.has(error.status)) {
-        throw error;
+    const context = await resolveAgentInvocationContext(request, resolved);
+    const shouldUseOpenResponses = context.mode !== "bindings-only";
+
+    if (shouldUseOpenResponses) {
+      try {
+        yield* streamOpenResponses(request, context, resolved);
+        return;
+      } catch (error) {
+        if (!(error instanceof OpenClawHttpError) || !shouldFallbackToGatewayCall(error)) {
+          throw error;
+        }
       }
     }
 
-    const fallbackResult = await runOpenClawGatewayCall(request, resolved);
+    const fallbackResult = await runOpenClawGatewayCall(request, context, resolved);
     if (fallbackResult.exitCode !== 0) {
       const stderr = normalizeOptionalString(fallbackResult.stderr) ?? "no stderr";
       throw new Error(
