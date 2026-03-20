@@ -1,4 +1,4 @@
-import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedRequest, ForwardedRequestHandler } from "./backend_client.js";
+import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler } from "./backend_client.js";
 export declare function resolveRelayWsBaseUrl(backendUrl: string): string;
 /**
  * WebSocket-based backend transport for connecting to ClawPal relay server.
@@ -9,6 +9,7 @@ export declare class WsBackendTransport implements BackendTransport {
     private context;
     private connected;
     private forwardedRequestHandler;
+    private forwardedFileRequestHandler;
     private readonly sentEvents;
     private readonly waiters;
     private reconnectAttempts;
@@ -21,9 +22,11 @@ export declare class WsBackendTransport implements BackendTransport {
     private socketGeneration;
     private _onClose?;
     onForwardedRequest(handler: ForwardedRequestHandler): void;
+    onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
     connect(context: BackendConnectionContext): Promise<void>;
     private scheduleReconnect;
     private handleRelayMessage;
+    private parseForwardedFileRequest;
     disconnect(reason?: string): Promise<void>;
     sendEvent(event: ConnectorEvent): Promise<void>;
     isConnected(): boolean;

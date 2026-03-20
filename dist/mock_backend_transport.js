@@ -10,9 +10,48 @@ export function createMockForwardedRequest(input) {
         createdAt: input.createdAt ?? new Date().toISOString()
     };
 }
+function normalizeFilePayload(operation, payload) {
+    if (operation === "agents.files.list") {
+        return payload ?? {};
+    }
+    if (operation === "agents.files.get") {
+        return payload ?? { bridgePath: "" };
+    }
+    return payload ?? { bridgePath: "", content: "" };
+}
+export function createMockForwardedFileRequest(input) {
+    const base = {
+        requestId: input.requestId ?? `file_req_${randomUUID()}`,
+        hostId: input.hostId,
+        userId: input.userId,
+        createdAt: input.createdAt ?? new Date().toISOString()
+    };
+    if (input.operation === "agents.files.list") {
+        return {
+            ...base,
+            operation: input.operation,
+            payload: normalizeFilePayload(input.operation, input.payload)
+        };
+    }
+    if (input.operation === "agents.files.get") {
+        return {
+            ...base,
+            operation: input.operation,
+            payload: normalizeFilePayload(input.operation, input.payload)
+        };
+    }
+    return {
+        ...base,
+        operation: input.operation,
+        payload: normalizeFilePayload(input.operation, input.payload)
+    };
+}
 export class MockBackendTransport {
     name = "mock";
     forwardedRequestHandler = async () => {
+        return;
+    };
+    forwardedFileRequestHandler = async () => {
         return;
     };
     connected = false;
@@ -21,6 +60,9 @@ export class MockBackendTransport {
     waiters = [];
     onForwardedRequest(handler) {
         this.forwardedRequestHandler = handler;
+    }
+    onForwardedFileRequest(handler) {
+        this.forwardedFileRequestHandler = handler;
     }
     async connect(context) {
         this.context = context;
@@ -56,6 +98,12 @@ export class MockBackendTransport {
             throw new Error("Mock backend transport is not connected.");
         }
         await this.forwardedRequestHandler(request);
+    }
+    async forwardFileRequest(request) {
+        if (!this.connected) {
+            throw new Error("Mock backend transport is not connected.");
+        }
+        await this.forwardedFileRequestHandler(request);
     }
     waitForEvent(predicate, timeoutMs = 3_000) {
         const matched = this.sentEvents.find(predicate);
