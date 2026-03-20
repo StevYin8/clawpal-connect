@@ -14,6 +14,39 @@ export interface ForwardedRequest {
     message: string;
     createdAt: string;
 }
+export type AgentFilesOperation = "agents.files.list" | "agents.files.get" | "agents.files.set";
+export interface AgentFilesListRequestPayload {
+    agentId?: string;
+}
+export interface AgentFilesGetRequestPayload {
+    agentId?: string;
+    bridgePath: string;
+}
+export interface AgentFilesSetRequestPayload {
+    agentId?: string;
+    bridgePath: string;
+    content: string;
+    expectedRevision?: string;
+}
+interface ForwardedFileRequestBase {
+    requestId: string;
+    hostId: string;
+    userId: string;
+    createdAt: string;
+}
+export interface ForwardedFileListRequest extends ForwardedFileRequestBase {
+    operation: "agents.files.list";
+    payload: AgentFilesListRequestPayload;
+}
+export interface ForwardedFileGetRequest extends ForwardedFileRequestBase {
+    operation: "agents.files.get";
+    payload: AgentFilesGetRequestPayload;
+}
+export interface ForwardedFileSetRequest extends ForwardedFileRequestBase {
+    operation: "agents.files.set";
+    payload: AgentFilesSetRequestPayload;
+}
+export type ForwardedFileRequest = ForwardedFileListRequest | ForwardedFileGetRequest | ForwardedFileSetRequest;
 export interface HostStatusEvent {
     type: "host.status";
     hostId: string;
@@ -55,6 +88,30 @@ export interface MessageErrorEvent {
     message: string;
     at: string;
 }
+export interface AgentFilesResponseError {
+    code: string;
+    message: string;
+    details?: unknown;
+}
+export interface AgentFilesResponseOkEvent {
+    type: "agents.files.response";
+    requestId: string;
+    hostId: string;
+    operation: AgentFilesOperation;
+    ok: true;
+    result: unknown;
+    at: string;
+}
+export interface AgentFilesResponseErrEvent {
+    type: "agents.files.response";
+    requestId: string;
+    hostId: string;
+    operation: AgentFilesOperation;
+    ok: false;
+    error: AgentFilesResponseError;
+    at: string;
+}
+export type AgentFilesResponseEvent = AgentFilesResponseOkEvent | AgentFilesResponseErrEvent;
 export type AgentDisplayStatus = "working" | "idle" | "waiting" | "error" | "offline" | "paused";
 export interface AgentRuntimeStatusEvent {
     type: "agent.runtime.status";
@@ -69,14 +126,16 @@ export interface AgentRuntimeStatusEvent {
     hasActiveError?: boolean;
     at: string;
 }
-export type ConnectorEvent = HostStatusEvent | MessageStartEvent | MessageDeltaEvent | MessageDoneEvent | MessageErrorEvent | AgentRuntimeStatusEvent;
-export type ConnectorEventInput = Omit<HostStatusEvent, "at"> | Omit<MessageStartEvent, "at"> | Omit<MessageDeltaEvent, "at"> | Omit<MessageDoneEvent, "at"> | Omit<MessageErrorEvent, "at"> | Omit<AgentRuntimeStatusEvent, "at">;
+export type ConnectorEvent = HostStatusEvent | MessageStartEvent | MessageDeltaEvent | MessageDoneEvent | MessageErrorEvent | AgentRuntimeStatusEvent | AgentFilesResponseEvent;
+export type ConnectorEventInput = Omit<HostStatusEvent, "at"> | Omit<MessageStartEvent, "at"> | Omit<MessageDeltaEvent, "at"> | Omit<MessageDoneEvent, "at"> | Omit<MessageErrorEvent, "at"> | Omit<AgentRuntimeStatusEvent, "at"> | Omit<AgentFilesResponseOkEvent, "at"> | Omit<AgentFilesResponseErrEvent, "at">;
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
+export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
 export interface BackendTransport {
     readonly name: string;
     connect(context: BackendConnectionContext): Promise<void>;
     disconnect(reason?: string): Promise<void>;
     onForwardedRequest(handler: ForwardedRequestHandler): void;
+    onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
     sendEvent(event: ConnectorEvent): Promise<void>;
 }
 interface BackendClientOptions {
@@ -88,15 +147,18 @@ export declare class BackendClient {
     private readonly transport;
     private readonly now;
     private readonly onUnhandledRequestError;
-    private readonly listeners;
+    private readonly chatRequestListeners;
+    private readonly fileRequestListeners;
     private connected;
     constructor(options: BackendClientOptions);
     getTransportName(): string;
     isConnected(): boolean;
     onForwardedRequest(listener: ForwardedRequestHandler): () => void;
+    onForwardedFileRequest(listener: ForwardedFileRequestHandler): () => void;
     connect(context: BackendConnectionContext): Promise<void>;
     disconnect(reason?: string): Promise<void>;
     sendEvent(event: ConnectorEventInput): Promise<void>;
     private dispatchForwardedRequest;
+    private dispatchForwardedFileRequest;
 }
 export {};

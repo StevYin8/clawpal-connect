@@ -1,3 +1,4 @@
+import type { AgentFilesGetRequestPayload, AgentFilesListRequestPayload, AgentFilesSetRequestPayload } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
@@ -5,6 +6,11 @@ import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./hos
 import { type SessionActivityMonitorFactory } from "./openclaw_session_activity_monitor.js";
 import { RuntimeWorker } from "./runtime_worker.js";
 import { type SyncedAgentIdProvider } from "./runtime_status_tracker.js";
+interface ConnectorFileBridgeService {
+    listAgentFiles(options: AgentFilesListRequestPayload): Promise<unknown>;
+    readAgentFile(input: AgentFilesGetRequestPayload): Promise<unknown>;
+    writeAgentFile(input: AgentFilesSetRequestPayload): Promise<unknown>;
+}
 export interface ConnectorStatusSnapshot {
     generatedAt: string;
     gateway: GatewayProbeResult;
@@ -22,6 +28,7 @@ interface ConnectorRuntimeOptions {
     gatewayDetector: GatewayDetector;
     backendClient: BackendClient;
     runtimeWorker?: RuntimeWorker;
+    fileBridgeService?: ConnectorFileBridgeService;
     heartbeatManager?: HeartbeatManager;
     syncedAgentIdProvider?: SyncedAgentIdProvider;
     sessionActivityMonitorFactory?: SessionActivityMonitorFactory;
@@ -32,6 +39,7 @@ export declare class ConnectorRuntime {
     private readonly gatewayDetector;
     private readonly backendClient;
     private readonly runtimeWorker;
+    private readonly fileBridgeService;
     private readonly heartbeatManager;
     private readonly syncedAgentIdProvider;
     private readonly sessionActivityMonitorFactory;
@@ -40,6 +48,12 @@ export declare class ConnectorRuntime {
     createStatusSnapshot(): Promise<ConnectorStatusSnapshot>;
     start(): Promise<RunningConnector>;
     private listTodoBoundaries;
+    private handleForwardedFileRequest;
+    private executeForwardedFileRequest;
+    private mapForwardedFileError;
+    private isFileNotFoundError;
+    private isPermissionDeniedError;
+    private isFileValidationError;
     private loadSyncedAgentIds;
     private initializeSessionActivity;
 }
