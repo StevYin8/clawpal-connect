@@ -1,3 +1,4 @@
+import { GatewayWatchdog } from "./gateway_watchdog.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { OpenClawAgentFileBridgeService, OpenClawAgentFileRevisionConflictError } from "./openclaw_agent_file_bridge.js";
 import { OpenClawSessionActivityMonitor } from "./openclaw_session_activity_monitor.js";
@@ -10,6 +11,7 @@ export class ConnectorRuntime {
     runtimeWorker;
     fileBridgeService;
     heartbeatManager;
+    gatewayWatchdog;
     syncedAgentIdProvider;
     sessionActivityMonitorFactory;
     now;
@@ -28,6 +30,9 @@ export class ConnectorRuntime {
                 });
         this.fileBridgeService = options.fileBridgeService ?? new OpenClawAgentFileBridgeService();
         this.heartbeatManager = options.heartbeatManager ?? new HeartbeatManager();
+        this.gatewayWatchdog = options.gatewayWatchdog ?? new GatewayWatchdog({
+            gatewayDetector: this.gatewayDetector
+        });
     }
     async createStatusSnapshot() {
         const [gateway, registry, activeHost] = await Promise.all([
@@ -38,6 +43,7 @@ export class ConnectorRuntime {
         return {
             generatedAt: this.now().toISOString(),
             gateway,
+            gatewayRecovery: this.gatewayWatchdog.getSnapshot(),
             registry,
             activeHost,
             todoBoundaries: this.listTodoBoundaries()
@@ -51,61 +57,69 @@ export class ConnectorRuntime {
         const syncedAgentIds = await this.loadSyncedAgentIds();
         const runtimeStatusTracker = new RuntimeStatusTracker(syncedAgentIds);
         const sessionActivityMonitor = this.sessionActivityMonitorFactory(syncedAgentIds);
-        await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
-        await this.backendClient.connect({
-            backendUrl: activeHost.backendUrl,
-            hostId: activeHost.hostId,
-            userId: activeHost.userId,
-            ...(activeHost.connectorToken ? { connectorToken: activeHost.connectorToken } : {})
-        });
-        const unsubscribeForwarding = this.backendClient.onForwardedRequest(async (request) => {
-            if (request.hostId !== activeHost.hostId) {
-                return;
-            }
-            runtimeStatusTracker.markForwardedRequestStarted(request);
-            try {
-                await this.runtimeWorker.handleForwardedRequest(request, async (event) => {
-                    await this.backendClient.sendEvent(event);
-                });
-            }
-            finally {
-                runtimeStatusTracker.markForwardedRequestCompleted(request.requestId);
-            }
-        });
-        const unsubscribeFileForwarding = this.backendClient.onForwardedFileRequest(async (request) => {
-            if (request.hostId !== activeHost.hostId) {
-                return;
-            }
-            const response = await this.handleForwardedFileRequest(request);
-            await this.backendClient.sendEvent(response);
-        });
-        const stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
-            runtimeStatusTracker.updateOpenClawSessionActivities(activities);
-        });
-        const stopHeartbeat = this.heartbeatManager.start({
-            hostId: activeHost.hostId,
-            sendEvent: async (event) => {
-                await this.backendClient.sendEvent(event);
-            },
-            statusProvider: () => (runtimeStatusTracker.hasActiveWork() ? "busy" : "online"),
-            agentStatusProviders: runtimeStatusTracker.getAgentStatusProviders()
-        });
-        let stopped = false;
-        return {
-            host: activeHost,
-            startedAt: this.now().toISOString(),
-            stop: async () => {
-                if (stopped) {
+        const stopGatewayWatchdog = this.gatewayWatchdog.start();
+        try {
+            await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
+            await this.backendClient.connect({
+                backendUrl: activeHost.backendUrl,
+                hostId: activeHost.hostId,
+                userId: activeHost.userId,
+                ...(activeHost.connectorToken ? { connectorToken: activeHost.connectorToken } : {})
+            });
+            const unsubscribeForwarding = this.backendClient.onForwardedRequest(async (request) => {
+                if (request.hostId !== activeHost.hostId) {
                     return;
                 }
-                stopped = true;
-                unsubscribeForwarding();
-                unsubscribeFileForwarding();
-                stopSessionActivityMonitor();
-                stopHeartbeat();
-                await this.backendClient.disconnect("connector.stop");
-            }
-        };
+                runtimeStatusTracker.markForwardedRequestStarted(request);
+                try {
+                    await this.runtimeWorker.handleForwardedRequest(request, async (event) => {
+                        await this.backendClient.sendEvent(event);
+                    });
+                }
+                finally {
+                    runtimeStatusTracker.markForwardedRequestCompleted(request.requestId);
+                }
+            });
+            const unsubscribeFileForwarding = this.backendClient.onForwardedFileRequest(async (request) => {
+                if (request.hostId !== activeHost.hostId) {
+                    return;
+                }
+                const response = await this.handleForwardedFileRequest(request);
+                await this.backendClient.sendEvent(response);
+            });
+            const stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
+                runtimeStatusTracker.updateOpenClawSessionActivities(activities);
+            });
+            const stopHeartbeat = this.heartbeatManager.start({
+                hostId: activeHost.hostId,
+                sendEvent: async (event) => {
+                    await this.backendClient.sendEvent(event);
+                },
+                statusProvider: () => (runtimeStatusTracker.hasActiveWork() ? "busy" : "online"),
+                agentStatusProviders: runtimeStatusTracker.getAgentStatusProviders()
+            });
+            let stopped = false;
+            return {
+                host: activeHost,
+                startedAt: this.now().toISOString(),
+                stop: async () => {
+                    if (stopped) {
+                        return;
+                    }
+                    stopped = true;
+                    unsubscribeForwarding();
+                    unsubscribeFileForwarding();
+                    stopSessionActivityMonitor();
+                    stopHeartbeat();
+                    stopGatewayWatchdog();
+                    await this.backendClient.disconnect("connector.stop");
+                }
+            };
+        }
+        catch (error) {
+            stopGatewayWatchdog();
+            throw error;
+        }
     }
     listTodoBoundaries() {
         return [

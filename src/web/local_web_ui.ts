@@ -44,6 +44,17 @@ function renderGatewayBadge(status: ConnectorStatusSnapshot["gateway"]["status"]
   return map[status];
 }
 
+function renderGatewayRecoveryPhase(phase: ConnectorStatusSnapshot["gatewayRecovery"]["phase"]): string {
+  const map: Record<ConnectorStatusSnapshot["gatewayRecovery"]["phase"], string> = {
+    stopped: "Stopped",
+    monitoring: "Monitoring",
+    recovering: "Recovering",
+    backoff: "Backoff",
+    manual_attention: "Manual Attention"
+  };
+  return map[phase];
+}
+
 function renderLastEvent(event?: ConnectorEvent): string {
   if (!event) {
     return "No backend events yet.";
@@ -62,6 +73,8 @@ function renderLastEvent(event?: ConnectorEvent): string {
 
 export function renderLocalStatusPage(snapshot: ConnectorDiagnosticsSnapshot): string {
   const gateway = snapshot.status.gateway;
+  const gatewayRecovery = snapshot.status.gatewayRecovery;
+  const latestRecovery = gatewayRecovery.recentRecoveries[0];
   const activeHost = snapshot.status.activeHost;
   const statusClass = `status-${gateway.status}`;
   const todoHtml = snapshot.status.todoBoundaries
@@ -119,6 +132,11 @@ export function renderLocalStatusPage(snapshot: ConnectorDiagnosticsSnapshot): s
       .status-offline { background: #ffe2df; color: #af2828; }
       .status-unauthorized { background: #ffeccc; color: #8f5f00; }
       .status-error { background: #efe5ff; color: #5734aa; }
+      .status-recovering { background: #ffeccc; color: #8f5f00; }
+      .status-backoff { background: #fff5cc; color: #8a6b00; }
+      .status-manual_attention { background: #ffe2df; color: #af2828; }
+      .status-monitoring { background: #d9f8e2; color: #0f7d3d; }
+      .status-stopped { background: #dce5eb; color: #415462; }
       ul {
         margin: 8px 0 0;
         padding-left: 18px;
@@ -139,6 +157,25 @@ export function renderLocalStatusPage(snapshot: ConnectorDiagnosticsSnapshot): s
         <span class="status ${statusClass}">${renderGatewayBadge(gateway.status)}</span>
         <p>${escapeHtml(gateway.detail)}</p>
         <p class="muted">endpoint: <code>${escapeHtml(gateway.endpoint)}</code> | latency: ${gateway.latencyMs}ms</p>
+        <p>
+          recovery:
+          <span class="status status-${escapeHtml(gatewayRecovery.phase)}">${renderGatewayRecoveryPhase(gatewayRecovery.phase)}</span>
+        </p>
+        <p class="muted">
+          failure threshold: ${gatewayRecovery.consecutiveProbeFailures}/${gatewayRecovery.consecutiveFailureThreshold}
+          |
+          restart failures: ${gatewayRecovery.consecutiveRecoveryFailures}/${gatewayRecovery.maxRecoveryAttempts}
+        </p>
+        ${
+          gatewayRecovery.nextRecoveryAllowedAt
+            ? `<p class="muted">next retry at: ${escapeHtml(gatewayRecovery.nextRecoveryAllowedAt)}</p>`
+            : ""
+        }
+        ${
+          latestRecovery
+            ? `<p class="muted">latest recovery: ${escapeHtml(latestRecovery.triggeredAt)} | ok=${latestRecovery.ok ? "yes" : "no"} | ${escapeHtml(latestRecovery.detail)}</p>`
+            : `<p class="muted">latest recovery: none</p>`
+        }
       </section>
 
       <div class="grid">
@@ -172,28 +209,41 @@ export function renderLocalStatusPage(snapshot: ConnectorDiagnosticsSnapshot): s
 }
 
 export async function startLocalWebUi(
-  getSnapshot: () => ConnectorDiagnosticsSnapshot,
+  getSnapshot: () => ConnectorDiagnosticsSnapshot | Promise<ConnectorDiagnosticsSnapshot>,
   options: LocalWebUiOptions = {}
 ): Promise<LocalWebUiServer> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 8787;
 
   const server = createServer((request, response) => {
-    const url = request.url ?? "/";
-    if (url.startsWith("/api/status")) {
-      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify(getSnapshot(), null, 2));
-      return;
-    }
+    void (async () => {
+      try {
+        const url = request.url ?? "/";
+        if (url.startsWith("/healthz")) {
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(JSON.stringify({ ok: true, ts: new Date().toISOString() }));
+          return;
+        }
 
-    if (url.startsWith("/healthz")) {
-      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify({ ok: true, ts: new Date().toISOString() }));
-      return;
-    }
+        const snapshot = await getSnapshot();
+        if (url.startsWith("/api/status")) {
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+          response.end(JSON.stringify(snapshot, null, 2));
+          return;
+        }
 
-    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    response.end(renderLocalStatusPage(getSnapshot()));
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        response.end(renderLocalStatusPage(snapshot));
+      } catch (error) {
+        response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(
+          JSON.stringify({
+            ok: false,
+            error: error instanceof Error ? error.message : "Unknown diagnostics snapshot error."
+          })
+        );
+      }
+    })();
   });
 
   await new Promise<void>((resolve, reject) => {

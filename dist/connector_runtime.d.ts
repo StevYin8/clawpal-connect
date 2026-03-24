@@ -1,6 +1,7 @@
 import type { AgentFilesGetRequestPayload, AgentFilesListRequestPayload, AgentFilesSetRequestPayload } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
+import { type GatewayWatchdogLifecycle, type GatewayWatchdogSnapshot } from "./gateway_watchdog.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./host_registry.js";
 import { type SessionActivityMonitorFactory } from "./openclaw_session_activity_monitor.js";
@@ -14,6 +15,7 @@ interface ConnectorFileBridgeService {
 export interface ConnectorStatusSnapshot {
     generatedAt: string;
     gateway: GatewayProbeResult;
+    gatewayRecovery: GatewayWatchdogSnapshot;
     registry: HostRegistryState;
     activeHost: RegisteredHost | null;
     todoBoundaries: string[];
@@ -30,6 +32,7 @@ interface ConnectorRuntimeOptions {
     runtimeWorker?: RuntimeWorker;
     fileBridgeService?: ConnectorFileBridgeService;
     heartbeatManager?: HeartbeatManager;
+    gatewayWatchdog?: GatewayWatchdogLifecycle;
     syncedAgentIdProvider?: SyncedAgentIdProvider;
     sessionActivityMonitorFactory?: SessionActivityMonitorFactory;
     now?: () => Date;
@@ -41,6 +44,7 @@ export declare class ConnectorRuntime {
     private readonly runtimeWorker;
     private readonly fileBridgeService;
     private readonly heartbeatManager;
+    private readonly gatewayWatchdog;
     private readonly syncedAgentIdProvider;
     private readonly sessionActivityMonitorFactory;
     private readonly now;

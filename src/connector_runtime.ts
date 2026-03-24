@@ -9,6 +9,7 @@ import type {
 } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
+import { GatewayWatchdog, type GatewayWatchdogLifecycle, type GatewayWatchdogSnapshot } from "./gateway_watchdog.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./host_registry.js";
 import {
@@ -32,6 +33,7 @@ interface ConnectorFileBridgeService {
 export interface ConnectorStatusSnapshot {
   generatedAt: string;
   gateway: GatewayProbeResult;
+  gatewayRecovery: GatewayWatchdogSnapshot;
   registry: HostRegistryState;
   activeHost: RegisteredHost | null;
   todoBoundaries: string[];
@@ -50,6 +52,7 @@ interface ConnectorRuntimeOptions {
   runtimeWorker?: RuntimeWorker;
   fileBridgeService?: ConnectorFileBridgeService;
   heartbeatManager?: HeartbeatManager;
+  gatewayWatchdog?: GatewayWatchdogLifecycle;
   syncedAgentIdProvider?: SyncedAgentIdProvider;
   sessionActivityMonitorFactory?: SessionActivityMonitorFactory;
   now?: () => Date;
@@ -62,6 +65,7 @@ export class ConnectorRuntime {
   private readonly runtimeWorker: RuntimeWorker;
   private readonly fileBridgeService: ConnectorFileBridgeService;
   private readonly heartbeatManager: HeartbeatManager;
+  private readonly gatewayWatchdog: GatewayWatchdogLifecycle;
   private readonly syncedAgentIdProvider: SyncedAgentIdProvider;
   private readonly sessionActivityMonitorFactory: SessionActivityMonitorFactory;
   private readonly now: () => Date;
@@ -81,6 +85,9 @@ export class ConnectorRuntime {
       });
     this.fileBridgeService = options.fileBridgeService ?? new OpenClawAgentFileBridgeService();
     this.heartbeatManager = options.heartbeatManager ?? new HeartbeatManager();
+    this.gatewayWatchdog = options.gatewayWatchdog ?? new GatewayWatchdog({
+      gatewayDetector: this.gatewayDetector
+    });
   }
 
   async createStatusSnapshot(): Promise<ConnectorStatusSnapshot> {
@@ -93,6 +100,7 @@ export class ConnectorRuntime {
     return {
       generatedAt: this.now().toISOString(),
       gateway,
+      gatewayRecovery: this.gatewayWatchdog.getSnapshot(),
       registry,
       activeHost,
       todoBoundaries: this.listTodoBoundaries()
@@ -108,69 +116,76 @@ export class ConnectorRuntime {
     const syncedAgentIds = await this.loadSyncedAgentIds();
     const runtimeStatusTracker = new RuntimeStatusTracker(syncedAgentIds);
     const sessionActivityMonitor = this.sessionActivityMonitorFactory(syncedAgentIds);
+    const stopGatewayWatchdog = this.gatewayWatchdog.start();
 
-    await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
+    try {
+      await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
 
-    await this.backendClient.connect({
-      backendUrl: activeHost.backendUrl,
-      hostId: activeHost.hostId,
-      userId: activeHost.userId,
-      ...(activeHost.connectorToken ? { connectorToken: activeHost.connectorToken } : {})
-    });
+      await this.backendClient.connect({
+        backendUrl: activeHost.backendUrl,
+        hostId: activeHost.hostId,
+        userId: activeHost.userId,
+        ...(activeHost.connectorToken ? { connectorToken: activeHost.connectorToken } : {})
+      });
 
-    const unsubscribeForwarding = this.backendClient.onForwardedRequest(async (request) => {
-      if (request.hostId !== activeHost.hostId) {
-        return;
-      }
-
-      runtimeStatusTracker.markForwardedRequestStarted(request);
-      try {
-        await this.runtimeWorker.handleForwardedRequest(request, async (event) => {
-          await this.backendClient.sendEvent(event);
-        });
-      } finally {
-        runtimeStatusTracker.markForwardedRequestCompleted(request.requestId);
-      }
-    });
-    const unsubscribeFileForwarding = this.backendClient.onForwardedFileRequest(async (request) => {
-      if (request.hostId !== activeHost.hostId) {
-        return;
-      }
-
-      const response = await this.handleForwardedFileRequest(request);
-      await this.backendClient.sendEvent(response);
-    });
-
-    const stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
-      runtimeStatusTracker.updateOpenClawSessionActivities(activities);
-    });
-
-    const stopHeartbeat = this.heartbeatManager.start({
-      hostId: activeHost.hostId,
-      sendEvent: async (event) => {
-        await this.backendClient.sendEvent(event);
-      },
-      statusProvider: () => (runtimeStatusTracker.hasActiveWork() ? "busy" : "online"),
-      agentStatusProviders: runtimeStatusTracker.getAgentStatusProviders()
-    });
-
-    let stopped = false;
-    return {
-      host: activeHost,
-      startedAt: this.now().toISOString(),
-      stop: async () => {
-        if (stopped) {
+      const unsubscribeForwarding = this.backendClient.onForwardedRequest(async (request) => {
+        if (request.hostId !== activeHost.hostId) {
           return;
         }
-        stopped = true;
 
-        unsubscribeForwarding();
-        unsubscribeFileForwarding();
-        stopSessionActivityMonitor();
-        stopHeartbeat();
-        await this.backendClient.disconnect("connector.stop");
-      }
-    };
+        runtimeStatusTracker.markForwardedRequestStarted(request);
+        try {
+          await this.runtimeWorker.handleForwardedRequest(request, async (event) => {
+            await this.backendClient.sendEvent(event);
+          });
+        } finally {
+          runtimeStatusTracker.markForwardedRequestCompleted(request.requestId);
+        }
+      });
+      const unsubscribeFileForwarding = this.backendClient.onForwardedFileRequest(async (request) => {
+        if (request.hostId !== activeHost.hostId) {
+          return;
+        }
+
+        const response = await this.handleForwardedFileRequest(request);
+        await this.backendClient.sendEvent(response);
+      });
+
+      const stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
+        runtimeStatusTracker.updateOpenClawSessionActivities(activities);
+      });
+
+      const stopHeartbeat = this.heartbeatManager.start({
+        hostId: activeHost.hostId,
+        sendEvent: async (event) => {
+          await this.backendClient.sendEvent(event);
+        },
+        statusProvider: () => (runtimeStatusTracker.hasActiveWork() ? "busy" : "online"),
+        agentStatusProviders: runtimeStatusTracker.getAgentStatusProviders()
+      });
+
+      let stopped = false;
+      return {
+        host: activeHost,
+        startedAt: this.now().toISOString(),
+        stop: async () => {
+          if (stopped) {
+            return;
+          }
+          stopped = true;
+
+          unsubscribeForwarding();
+          unsubscribeFileForwarding();
+          stopSessionActivityMonitor();
+          stopHeartbeat();
+          stopGatewayWatchdog();
+          await this.backendClient.disconnect("connector.stop");
+        }
+      };
+    } catch (error) {
+      stopGatewayWatchdog();
+      throw error;
+    }
   }
 
   private listTodoBoundaries(): string[] {

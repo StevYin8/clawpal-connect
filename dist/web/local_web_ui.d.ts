@@ -19,4 +19,4 @@ export interface ConnectorDiagnosticsSnapshot {
     };
 }
 export declare function renderLocalStatusPage(snapshot: ConnectorDiagnosticsSnapshot): string;
-export declare function startLocalWebUi(getSnapshot: () => ConnectorDiagnosticsSnapshot, options?: LocalWebUiOptions): Promise<LocalWebUiServer>;
+export declare function startLocalWebUi(getSnapshot: () => ConnectorDiagnosticsSnapshot | Promise<ConnectorDiagnosticsSnapshot>, options?: LocalWebUiOptions): Promise<LocalWebUiServer>;
