@@ -62,12 +62,71 @@ export interface OpenClawAgentFileBridgeDescriptor {
   updatedAt?: string;
 }
 
+export type OpenClawAgentFactSource = "openclaw-filesystem" | "openclaw-sessions-index" | "unavailable";
+
+export interface OpenClawAgentFactAvailability {
+  available: boolean;
+  source: OpenClawAgentFactSource;
+  detail: string;
+}
+
+export interface OpenClawAgentFileDomainFacts {
+  availability: OpenClawAgentFactAvailability;
+  bridgePaths: string[];
+  existingBridgePaths: string[];
+}
+
+export interface OpenClawAgentSkillFacts {
+  availability: OpenClawAgentFactAvailability;
+  workspaceSkillIds: string[];
+  sharedSkillIds: string[];
+  contextBridgePaths: string[];
+}
+
+export interface OpenClawAgentMemoryFacts {
+  availability: OpenClawAgentFactAvailability;
+  rootBridgePaths: string[];
+  entryBridgePaths: string[];
+  categories: string[];
+  markdownFileCount: number;
+}
+
+export interface OpenClawAgentScheduledTaskFacts {
+  availability: OpenClawAgentFactAvailability;
+  sessionsIndexPath: string;
+  observedTaskCount?: number;
+  observedCronLikeTaskCount?: number;
+  lastCronLikeActivityAt?: string;
+}
+
+export interface OpenClawAgentUsageFacts {
+  taskCounts: {
+    availability: OpenClawAgentFactAvailability;
+    observedTaskCount?: number;
+  };
+  // OpenClaw does not currently expose a stable local per-agent token ledger in this connector.
+  tokenUsage: OpenClawAgentFactAvailability;
+}
+
+export interface OpenClawAgentFactSnapshot {
+  schemaVersion: 1;
+  generatedAt: string;
+  soul: OpenClawAgentFileDomainFacts;
+  personality: OpenClawAgentFileDomainFacts;
+  identity: OpenClawAgentFileDomainFacts;
+  skills: OpenClawAgentSkillFacts;
+  memory: OpenClawAgentMemoryFacts;
+  scheduledTasks: OpenClawAgentScheduledTaskFacts;
+  usage: OpenClawAgentUsageFacts;
+}
+
 export interface OpenClawAgentFilesListResult {
   agentId: string;
   stateDir: string;
   configPath: string;
   workspaceDir: string;
   files: OpenClawAgentFileBridgeDescriptor[];
+  factSnapshot: OpenClawAgentFactSnapshot;
 }
 
 export interface OpenClawAgentFilesListOptions {
@@ -124,6 +183,12 @@ interface ParsedBridgePath {
   segments: string[];
 }
 
+interface OpenClawSessionIndexSummary {
+  totalObservedSessions: number;
+  cronLikeObservedSessions: number;
+  lastCronLikeActivityAt?: string;
+}
+
 export class OpenClawAgentFileRevisionConflictError extends Error {
   readonly code = "openclaw_agent_file_revision_conflict";
   readonly bridgePath: string;
@@ -155,6 +220,37 @@ function normalizeOptionalString(value: unknown): string | undefined {
   }
   const normalized = value.trim();
   return normalized ? normalized : undefined;
+}
+
+function normalizeOptionalToken(value: unknown): string | undefined {
+  return normalizeOptionalString(value)?.toLowerCase();
+}
+
+function parseTimestampMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const normalized = Math.trunc(value);
+    return normalized > 0 ? normalized : undefined;
+  }
+
+  const stringValue = normalizeOptionalString(value);
+  if (!stringValue) {
+    return undefined;
+  }
+
+  if (/^\d+$/.test(stringValue)) {
+    const parsed = Number.parseInt(stringValue, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  const parsed = Date.parse(stringValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
 }
 
 function resolveUserPath(value: string): string {
@@ -452,6 +548,112 @@ function sortTargets(targets: ResolvedBridgeFileTarget[]): ResolvedBridgeFileTar
   return [...targets].sort((left, right) => left.bridgePath.localeCompare(right.bridgePath));
 }
 
+function dedupeAndSort(values: Iterable<string>): string[] {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function isCronLikeSessionEntry(entry: Record<string, unknown>): boolean {
+  const origin = asRecord(entry.origin) ?? {};
+  const provider = normalizeOptionalToken(origin.provider);
+  const surface = normalizeOptionalToken(origin.surface);
+  const originChatType = normalizeOptionalToken(origin.chatType);
+  const chatType = normalizeOptionalToken(entry.chatType);
+  return provider === "cron" || surface === "cron" || originChatType === "cron" || chatType === "cron";
+}
+
+function parseSessionsIndexSummary(content: string): OpenClawSessionIndexSummary {
+  const parsed = JSON.parse(content) as unknown;
+  let entries: unknown[] = [];
+  if (Array.isArray(parsed)) {
+    entries = parsed;
+  } else {
+    entries = Object.values(asRecord(parsed) ?? {});
+  }
+
+  let totalObservedSessions = 0;
+  let cronLikeObservedSessions = 0;
+  let lastCronLikeActivityMs = 0;
+
+  for (const entry of entries) {
+    const record = asRecord(entry);
+    if (!record) {
+      continue;
+    }
+
+    totalObservedSessions += 1;
+    if (!isCronLikeSessionEntry(record)) {
+      continue;
+    }
+
+    cronLikeObservedSessions += 1;
+    const updatedAtMs = parseTimestampMs(record.updatedAt);
+    if (updatedAtMs && updatedAtMs > lastCronLikeActivityMs) {
+      lastCronLikeActivityMs = updatedAtMs;
+    }
+  }
+
+  return {
+    totalObservedSessions,
+    cronLikeObservedSessions,
+    ...(lastCronLikeActivityMs > 0 ? { lastCronLikeActivityAt: new Date(lastCronLikeActivityMs).toISOString() } : {})
+  };
+}
+
+function buildFileDomainFacts(
+  files: OpenClawAgentFileBridgeDescriptor[],
+  detailIfAvailable: string,
+  detailIfUnavailable: string
+): OpenClawAgentFileDomainFacts {
+  const bridgePaths = dedupeAndSort(files.map((file) => file.bridgePath));
+  const existingBridgePaths = dedupeAndSort(files.filter((file) => file.exists).map((file) => file.bridgePath));
+  const available = existingBridgePaths.length > 0;
+
+  return {
+    availability: {
+      available,
+      source: "openclaw-filesystem",
+      detail: available ? detailIfAvailable : detailIfUnavailable
+    },
+    bridgePaths,
+    existingBridgePaths
+  };
+}
+
+function extractSkillIdsByPrefix(bridgePaths: string[], prefix: string): string[] {
+  const suffixPrefix = `${prefix}/`;
+  const ids = new Set<string>();
+  for (const bridgePath of bridgePaths) {
+    if (!bridgePath.startsWith(suffixPrefix)) {
+      continue;
+    }
+    const relative = bridgePath.slice(suffixPrefix.length);
+    const [skillId] = relative.split("/");
+    const normalizedSkillId = skillId?.trim();
+    if (!normalizedSkillId) {
+      continue;
+    }
+    ids.add(normalizedSkillId);
+  }
+  return [...ids].sort((left, right) => left.localeCompare(right));
+}
+
+function extractMemoryCategories(memoryEntryBridgePaths: string[]): string[] {
+  const categories = new Set<string>();
+  for (const bridgePath of memoryEntryBridgePaths) {
+    const relative = bridgePath.slice("workspace/memory/".length);
+    if (!relative) {
+      continue;
+    }
+    const parts = relative.split("/").filter(Boolean);
+    if (parts.length <= 1) {
+      categories.add("root");
+      continue;
+    }
+    categories.add(parts[0] ?? "root");
+  }
+  return [...categories].sort((left, right) => left.localeCompare(right));
+}
+
 async function loadSkillTargets(rootDir: string, bridgePrefix: string, domain: OpenClawAgentFileDomain): Promise<ResolvedBridgeFileTarget[]> {
   const targets: ResolvedBridgeFileTarget[] = [];
   const skillsRootStats = await safeStat(rootDir);
@@ -586,13 +788,15 @@ export class OpenClawAgentFileBridgeService {
 
     const sortedTargets = sortTargets([...targetsByPath.values()]);
     const descriptors = await Promise.all(sortedTargets.map(async (target) => await this.describeTarget(target)));
+    const factSnapshot = await this.buildFactSnapshot(context, descriptors);
 
     return {
       agentId: context.agentId,
       stateDir: this.stateDir,
       configPath: this.configPath,
       workspaceDir: context.workspaceDir,
-      files: descriptors
+      files: descriptors,
+      factSnapshot
     };
   }
 
@@ -661,6 +865,127 @@ export class OpenClawAgentFileBridgeService {
     return {
       file: descriptor,
       revision: computeRevision(input.content)
+    };
+  }
+
+  private async buildFactSnapshot(
+    context: ResolvedAgentContext,
+    files: OpenClawAgentFileBridgeDescriptor[]
+  ): Promise<OpenClawAgentFactSnapshot> {
+    const soulFiles = files.filter((file) => file.category === "soul" || file.category === "personality");
+    const identityFiles = files.filter((file) => file.category === "identity");
+    const memoryFiles = files.filter((file) => file.category === "memory");
+    const skillFiles = files.filter((file) => file.category === "skills");
+    const configFiles = files.filter((file) => file.category === "config");
+
+    const soul = buildFileDomainFacts(
+      soulFiles,
+      "检测到宿主端 Soul / Personality 文件。",
+      "未检测到宿主端 Soul / Personality 文件。"
+    );
+    const personality = buildFileDomainFacts(
+      soulFiles.filter((file) => file.category === "personality"),
+      "检测到宿主端 personality 文件。",
+      "未检测到独立 personality 文件。"
+    );
+    const identity = buildFileDomainFacts(
+      identityFiles,
+      "检测到宿主端 identity 文件。",
+      "未检测到宿主端 identity 文件。"
+    );
+
+    const workspaceSkillIds = extractSkillIdsByPrefix(
+      skillFiles.map((file) => file.bridgePath),
+      "workspace/skills"
+    );
+    const sharedSkillIds = extractSkillIdsByPrefix(
+      skillFiles.map((file) => file.bridgePath),
+      "shared-skills"
+    );
+
+    const sessionsIndexPath = join(this.stateDir, "sessions.json");
+    const sessionsIndexCurrent = await this.tryReadCurrent(sessionsIndexPath);
+    const sessionsIndexSummary = sessionsIndexCurrent
+      ? parseSessionsIndexSummary(sessionsIndexCurrent.content)
+      : undefined;
+
+    const memoryEntryBridgePaths = memoryFiles
+      .filter((file) => file.bridgePath.startsWith("workspace/memory/"))
+      .map((file) => file.bridgePath);
+
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      soul,
+      personality,
+      identity,
+      skills: {
+        availability: {
+          available: skillFiles.some((file) => file.exists),
+          source: skillFiles.some((file) => file.exists) ? "openclaw-filesystem" : "unavailable",
+          detail: skillFiles.some((file) => file.exists)
+            ? "已从 OpenClaw 技能目录读取技能事实。"
+            : "未在本地 OpenClaw 技能目录中发现技能事实。"
+        },
+        workspaceSkillIds,
+        sharedSkillIds,
+        contextBridgePaths: dedupeAndSort(skillFiles.map((file) => file.bridgePath))
+      },
+      memory: {
+        availability: {
+          available: memoryFiles.some((file) => file.exists),
+          source: memoryFiles.some((file) => file.exists) ? "openclaw-filesystem" : "unavailable",
+          detail: memoryFiles.some((file) => file.exists)
+            ? "已从 MEMORY / memory/*.md 读取记忆事实。"
+            : "未发现本地记忆文件。"
+        },
+        rootBridgePaths: dedupeAndSort(
+          memoryFiles
+            .filter((file) => file.bridgePath === "workspace/MEMORY.md" || file.bridgePath === "workspace/memory.md")
+            .map((file) => file.bridgePath)
+        ),
+        entryBridgePaths: dedupeAndSort(memoryEntryBridgePaths),
+        categories: extractMemoryCategories(memoryEntryBridgePaths),
+        markdownFileCount: memoryFiles.filter((file) => file.exists).length
+      },
+      scheduledTasks: {
+        availability: {
+          available: Boolean(sessionsIndexCurrent),
+          source: sessionsIndexCurrent ? "openclaw-sessions-index" : "unavailable",
+          detail: sessionsIndexCurrent
+            ? "已从 OpenClaw sessions 索引观察定时任务活动。"
+            : "未发现可用的 OpenClaw sessions 索引。"
+        },
+        sessionsIndexPath,
+        ...(sessionsIndexSummary
+          ? {
+              observedTaskCount: sessionsIndexSummary.totalObservedSessions,
+              observedCronLikeTaskCount: sessionsIndexSummary.cronLikeObservedSessions,
+              ...(sessionsIndexSummary.lastCronLikeActivityAt
+                ? { lastCronLikeActivityAt: sessionsIndexSummary.lastCronLikeActivityAt }
+                : {})
+            }
+          : {})
+      },
+      usage: {
+        taskCounts: {
+          availability: {
+            available: Boolean(sessionsIndexCurrent),
+            source: sessionsIndexCurrent ? "openclaw-sessions-index" : "unavailable",
+            detail: sessionsIndexCurrent
+              ? "已从 OpenClaw sessions 索引统计任务数。"
+              : "未发现可统计的本地任务索引。"
+          },
+          ...(sessionsIndexSummary ? { observedTaskCount: sessionsIndexSummary.totalObservedSessions } : {})
+        },
+        tokenUsage: {
+          available: configFiles.some((file) => file.exists),
+          source: configFiles.some((file) => file.exists) ? "openclaw-filesystem" : "unavailable",
+          detail: configFiles.some((file) => file.exists)
+            ? "已发现可供补充 usage/token 统计的本地配置文件。"
+            : "本地尚未暴露稳定的 per-agent token ledger。"
+        }
+      }
     };
   }
 
