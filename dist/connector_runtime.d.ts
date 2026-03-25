@@ -1,4 +1,4 @@
-import type { AgentFilesGetRequestPayload, AgentFilesListRequestPayload, AgentFilesSetRequestPayload } from "./backend_client.js";
+import type { AgentFilesGetRequestPayload, AgentFilesListRequestPayload, AgentFilesSetRequestPayload, TransportRecoverySnapshot } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
 import { type GatewayWatchdogLifecycle, type GatewayWatchdogSnapshot } from "./gateway_watchdog.js";
@@ -16,6 +16,7 @@ export interface ConnectorStatusSnapshot {
     generatedAt: string;
     gateway: GatewayProbeResult;
     gatewayRecovery: GatewayWatchdogSnapshot;
+    transportRecovery: TransportRecoverySnapshot;
     registry: HostRegistryState;
     activeHost: RegisteredHost | null;
     todoBoundaries: string[];

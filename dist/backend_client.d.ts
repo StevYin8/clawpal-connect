@@ -130,6 +130,55 @@ export type ConnectorEvent = HostStatusEvent | MessageStartEvent | MessageDeltaE
 export type ConnectorEventInput = Omit<HostStatusEvent, "at"> | Omit<MessageStartEvent, "at"> | Omit<MessageDeltaEvent, "at"> | Omit<MessageDoneEvent, "at"> | Omit<MessageErrorEvent, "at"> | Omit<AgentRuntimeStatusEvent, "at"> | Omit<AgentFilesResponseOkEvent, "at"> | Omit<AgentFilesResponseErrEvent, "at">;
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
+export type TransportRecoveryPhase = "unsupported" | "idle" | "reconnecting" | "diagnosing" | "recovering_gateway" | "relay_unreachable" | "manual_attention";
+export type TransportRecoveryStatus = "unsupported" | "healthy" | "degraded" | "recovering" | "relay_unreachable" | "manual_attention";
+export type TransportRecoveryAttemptClassification = "relay_unreachable" | "gateway_unhealthy_recovered" | "gateway_unhealthy_unresolved" | "diagnostic_error";
+export interface TransportRecoveryGatewayProbe {
+    status: "online" | "unauthorized" | "offline" | "error";
+    ok: boolean;
+    detail: string;
+    checkedAt: string;
+    endpoint: string;
+    latencyMs: number;
+    httpStatus?: number;
+}
+export interface TransportRecoveryAttemptRecord {
+    id: number;
+    trigger: "consecutive_connect_failures";
+    triggeredAt: string;
+    completedAt: string;
+    consecutiveConnectFailures: number;
+    ok: boolean;
+    classification: TransportRecoveryAttemptClassification;
+    detail: string;
+    gatewayProbe?: TransportRecoveryGatewayProbe;
+    restartCommand?: string;
+    restartExitCode?: number | null;
+    restartSignal?: NodeJS.Signals | null;
+    restartStdout?: string;
+    restartStderr?: string;
+    restartError?: string;
+}
+export interface TransportRecoverySnapshot {
+    supported: boolean;
+    phase: TransportRecoveryPhase;
+    status: TransportRecoveryStatus;
+    detail: string;
+    consecutiveFailureThreshold: number;
+    consecutiveConnectFailures: number;
+    consecutiveGatewayRecoveryFailures: number;
+    maxGatewayRecoveryAttempts: number;
+    reconnectAttempts: number;
+    lastConnectSuccessAt?: string;
+    lastConnectFailureAt?: string;
+    lastFailureDetail?: string;
+    lastSuccessDetail?: string;
+    lastRecoverySuccessAt?: string;
+    lastRecoveryFailureAt?: string;
+    lastGatewayProbe?: TransportRecoveryGatewayProbe;
+    recentRecoveryAttempts: TransportRecoveryAttemptRecord[];
+}
+export declare function createUnsupportedTransportRecoverySnapshot(detail?: string): TransportRecoverySnapshot;
 export interface BackendTransport {
     readonly name: string;
     connect(context: BackendConnectionContext): Promise<void>;
@@ -137,6 +186,7 @@ export interface BackendTransport {
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
     sendEvent(event: ConnectorEvent): Promise<void>;
+    getRecoverySnapshot?(): TransportRecoverySnapshot;
 }
 interface BackendClientOptions {
     transport: BackendTransport;
@@ -153,6 +203,7 @@ export declare class BackendClient {
     constructor(options: BackendClientOptions);
     getTransportName(): string;
     isConnected(): boolean;
+    getTransportRecoverySnapshot(): TransportRecoverySnapshot;
     onForwardedRequest(listener: ForwardedRequestHandler): () => void;
     onForwardedFileRequest(listener: ForwardedFileRequestHandler): () => void;
     connect(context: BackendConnectionContext): Promise<void>;

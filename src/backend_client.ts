@@ -171,6 +171,94 @@ export type ConnectorEventInput =
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
 
+export type TransportRecoveryPhase =
+  | "unsupported"
+  | "idle"
+  | "reconnecting"
+  | "diagnosing"
+  | "recovering_gateway"
+  | "relay_unreachable"
+  | "manual_attention";
+
+export type TransportRecoveryStatus =
+  | "unsupported"
+  | "healthy"
+  | "degraded"
+  | "recovering"
+  | "relay_unreachable"
+  | "manual_attention";
+
+export type TransportRecoveryAttemptClassification =
+  | "relay_unreachable"
+  | "gateway_unhealthy_recovered"
+  | "gateway_unhealthy_unresolved"
+  | "diagnostic_error";
+
+export interface TransportRecoveryGatewayProbe {
+  status: "online" | "unauthorized" | "offline" | "error";
+  ok: boolean;
+  detail: string;
+  checkedAt: string;
+  endpoint: string;
+  latencyMs: number;
+  httpStatus?: number;
+}
+
+export interface TransportRecoveryAttemptRecord {
+  id: number;
+  trigger: "consecutive_connect_failures";
+  triggeredAt: string;
+  completedAt: string;
+  consecutiveConnectFailures: number;
+  ok: boolean;
+  classification: TransportRecoveryAttemptClassification;
+  detail: string;
+  gatewayProbe?: TransportRecoveryGatewayProbe;
+  restartCommand?: string;
+  restartExitCode?: number | null;
+  restartSignal?: NodeJS.Signals | null;
+  restartStdout?: string;
+  restartStderr?: string;
+  restartError?: string;
+}
+
+export interface TransportRecoverySnapshot {
+  supported: boolean;
+  phase: TransportRecoveryPhase;
+  status: TransportRecoveryStatus;
+  detail: string;
+  consecutiveFailureThreshold: number;
+  consecutiveConnectFailures: number;
+  consecutiveGatewayRecoveryFailures: number;
+  maxGatewayRecoveryAttempts: number;
+  reconnectAttempts: number;
+  lastConnectSuccessAt?: string;
+  lastConnectFailureAt?: string;
+  lastFailureDetail?: string;
+  lastSuccessDetail?: string;
+  lastRecoverySuccessAt?: string;
+  lastRecoveryFailureAt?: string;
+  lastGatewayProbe?: TransportRecoveryGatewayProbe;
+  recentRecoveryAttempts: TransportRecoveryAttemptRecord[];
+}
+
+export function createUnsupportedTransportRecoverySnapshot(
+  detail = "Transport does not expose recovery diagnostics."
+): TransportRecoverySnapshot {
+  return {
+    supported: false,
+    phase: "unsupported",
+    status: "unsupported",
+    detail,
+    consecutiveFailureThreshold: 0,
+    consecutiveConnectFailures: 0,
+    consecutiveGatewayRecoveryFailures: 0,
+    maxGatewayRecoveryAttempts: 0,
+    reconnectAttempts: 0,
+    recentRecoveryAttempts: []
+  };
+}
+
 export interface BackendTransport {
   readonly name: string;
   connect(context: BackendConnectionContext): Promise<void>;
@@ -178,6 +266,7 @@ export interface BackendTransport {
   onForwardedRequest(handler: ForwardedRequestHandler): void;
   onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
   sendEvent(event: ConnectorEvent): Promise<void>;
+  getRecoverySnapshot?(): TransportRecoverySnapshot;
 }
 
 interface BackendClientOptions {
@@ -222,6 +311,10 @@ export class BackendClient {
 
   isConnected(): boolean {
     return this.connected;
+  }
+
+  getTransportRecoverySnapshot(): TransportRecoverySnapshot {
+    return this.transport.getRecoverySnapshot?.() ?? createUnsupportedTransportRecoverySnapshot();
   }
 
   onForwardedRequest(listener: ForwardedRequestHandler): () => void {
