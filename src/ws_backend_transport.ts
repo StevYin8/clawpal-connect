@@ -11,8 +11,13 @@ import type {
   ForwardedFileRequestHandler,
   ForwardedRequest,
   ForwardedRequestHandler,
-  HostConnectionStatus
+  HostConnectionStatus,
+  TransportRecoveryAttemptRecord,
+  TransportRecoveryGatewayProbe,
+  TransportRecoverySnapshot
 } from "./backend_client.js";
+import type { GatewayProbeResult } from "./gateway_detector.js";
+import { OpenClawGatewayCommandRunner, type GatewayCommandExecution, type GatewayCommandRunner } from "./gateway_watchdog.js";
 
 interface EventWaiter {
   predicate: (event: ConnectorEvent) => boolean;
@@ -21,11 +26,67 @@ interface EventWaiter {
   timeout: NodeJS.Timeout;
 }
 
+interface GatewayProbeDetector {
+  detect(): Promise<GatewayProbeResult>;
+}
+
+export interface WsBackendTransportOptions {
+  gatewayDetector?: GatewayProbeDetector;
+  gatewayCommandRunner?: GatewayCommandRunner;
+  connectTimeoutMs?: number;
+  reconnectDelayMs?: number;
+  maxReconnectDelayMs?: number;
+  recoveryConsecutiveFailureThreshold?: number;
+  maxGatewayRecoveryAttempts?: number;
+  recoveryHistoryLimit?: number;
+  now?: () => Date;
+  setTimeoutImpl?: (callback: () => void, ms: number) => NodeJS.Timeout;
+  clearTimeoutImpl?: (timer: NodeJS.Timeout) => void;
+  createWebSocket?: (url: string) => WebSocket;
+}
+
 const AGENT_FILES_OPERATIONS: readonly AgentFilesOperation[] = [
   "agents.files.list",
   "agents.files.get",
   "agents.files.set"
 ];
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_RECONNECT_DELAY_MS = 1_000;
+const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
+const DEFAULT_RECOVERY_CONSECUTIVE_FAILURE_THRESHOLD = 3;
+const DEFAULT_MAX_GATEWAY_RECOVERY_ATTEMPTS = 5;
+const DEFAULT_RECOVERY_HISTORY_LIMIT = 20;
+
+function normalizePositiveInt(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  const parsed = Math.trunc(value);
+  return parsed > 0 ? parsed : fallback;
+}
+
+function normalizeNonNegativeInt(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  const parsed = Math.trunc(value);
+  return parsed >= 0 ? parsed : fallback;
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function cloneGatewayProbe(probe: TransportRecoveryGatewayProbe): TransportRecoveryGatewayProbe {
+  return { ...probe };
+}
+
+function cloneRecoveryAttempt(record: TransportRecoveryAttemptRecord): TransportRecoveryAttemptRecord {
+  return {
+    ...record,
+    ...(record.gatewayProbe ? { gatewayProbe: cloneGatewayProbe(record.gatewayProbe) } : {})
+  };
+}
 
 function isAgentFilesOperation(value: unknown): value is AgentFilesOperation {
   return typeof value === "string" && AGENT_FILES_OPERATIONS.includes(value as AgentFilesOperation);
@@ -78,6 +139,19 @@ export function resolveRelayWsBaseUrl(backendUrl: string): string {
 export class WsBackendTransport implements BackendTransport {
   readonly name = "ws";
 
+  private readonly gatewayDetector: GatewayProbeDetector | undefined;
+  private readonly gatewayCommandRunner: GatewayCommandRunner | undefined;
+  private readonly connectTimeoutMs: number;
+  private readonly reconnectDelayMs: number;
+  private readonly maxReconnectDelayMs: number;
+  private readonly recoveryConsecutiveFailureThreshold: number;
+  private readonly maxGatewayRecoveryAttempts: number;
+  private readonly recoveryHistoryLimit: number;
+  private readonly now: () => Date;
+  private readonly setTimeoutImpl: NonNullable<WsBackendTransportOptions["setTimeoutImpl"]>;
+  private readonly clearTimeoutImpl: NonNullable<WsBackendTransportOptions["clearTimeoutImpl"]>;
+  private readonly createWebSocket: NonNullable<WsBackendTransportOptions["createWebSocket"]>;
+
   private ws: WebSocket | null = null;
   private context: BackendConnectionContext | null = null;
   private connected = false;
@@ -85,15 +159,50 @@ export class WsBackendTransport implements BackendTransport {
   private forwardedFileRequestHandler: ForwardedFileRequestHandler = async () => {};
   private readonly sentEvents: ConnectorEvent[] = [];
   private readonly waiters: EventWaiter[] = [];
+  private recoveryPhase: TransportRecoverySnapshot["phase"] = "idle";
+  private recoveryStatus: TransportRecoverySnapshot["status"] = "healthy";
+  private recoveryDetail = "WebSocket transport is healthy.";
+  private consecutiveConnectFailures = 0;
+  private consecutiveGatewayRecoveryFailures = 0;
+  private lastConnectSuccessAt: string | undefined;
+  private lastConnectFailureAt: string | undefined;
+  private lastFailureDetail: string | undefined;
+  private lastSuccessDetail: string | undefined;
+  private lastRecoverySuccessAt: string | undefined;
+  private lastRecoveryFailureAt: string | undefined;
+  private lastGatewayProbe: TransportRecoveryGatewayProbe | undefined;
+  private recoveryAttemptCounter = 0;
+  private recoveryInProgress = false;
+  private readonly recentRecoveryAttempts: TransportRecoveryAttemptRecord[] = [];
   private reconnectAttempts = 0;
   private maxReconnectAttempts = Number.POSITIVE_INFINITY;
-  private reconnectDelayMs = 1000;
-  private maxReconnectDelayMs = 30000;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private reconnecting = false;
   private intentionalDisconnect = false;
   private socketGeneration = 0;
   private _onClose?: (reason: string) => void;
+
+  constructor(options: WsBackendTransportOptions = {}) {
+    this.gatewayDetector = options.gatewayDetector;
+    this.gatewayCommandRunner =
+      options.gatewayCommandRunner ?? (this.gatewayDetector ? new OpenClawGatewayCommandRunner() : undefined);
+    this.connectTimeoutMs = normalizePositiveInt(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS);
+    this.reconnectDelayMs = normalizePositiveInt(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
+    this.maxReconnectDelayMs = normalizePositiveInt(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS);
+    this.recoveryConsecutiveFailureThreshold = normalizePositiveInt(
+      options.recoveryConsecutiveFailureThreshold,
+      DEFAULT_RECOVERY_CONSECUTIVE_FAILURE_THRESHOLD
+    );
+    this.maxGatewayRecoveryAttempts = normalizePositiveInt(
+      options.maxGatewayRecoveryAttempts,
+      DEFAULT_MAX_GATEWAY_RECOVERY_ATTEMPTS
+    );
+    this.recoveryHistoryLimit = normalizePositiveInt(options.recoveryHistoryLimit, DEFAULT_RECOVERY_HISTORY_LIMIT);
+    this.now = options.now ?? (() => new Date());
+    this.setTimeoutImpl = options.setTimeoutImpl ?? setTimeout;
+    this.clearTimeoutImpl = options.clearTimeoutImpl ?? clearTimeout;
+    this.createWebSocket = options.createWebSocket ?? ((url) => new WebSocket(url));
+  }
 
   onForwardedRequest(handler: ForwardedRequestHandler): void {
     this.forwardedRequestHandler = handler;
@@ -107,7 +216,7 @@ export class WsBackendTransport implements BackendTransport {
     this.context = context;
     this.intentionalDisconnect = false;
     if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
+      this.clearTimeoutImpl(this.reconnectTimer);
       this.reconnectTimer = null;
     }
 
@@ -122,19 +231,27 @@ export class WsBackendTransport implements BackendTransport {
     return new Promise((resolve, reject) => {
       try {
         console.log(`[ws] Connecting to ${wsUrl}...`);
-        const ws = new WebSocket(wsUrl);
+        const ws = this.createWebSocket(wsUrl);
         this.ws = ws;
         let settled = false;
-        const timeout = setTimeout(() => {
-          if (settled || this.ws !== ws || this.connected) {
+        const failConnect = (error: Error): void => {
+          if (settled || this.ws !== ws || generation !== this.socketGeneration) {
             return;
           }
           settled = true;
+          this.clearTimeoutImpl(timeout);
+          this.recordConnectFailure(error.message);
+          reject(error);
+        };
+        const timeout = this.setTimeoutImpl(() => {
+          if (settled || this.ws !== ws || this.connected) {
+            return;
+          }
           try {
             ws.close();
           } catch {}
-          reject(new Error("Connection timeout"));
-        }, 10000);
+          failConnect(new Error("Connection timeout"));
+        }, this.connectTimeoutMs);
 
         ws.on("open", () => {
           if (this.ws !== ws || generation !== this.socketGeneration) {
@@ -144,11 +261,12 @@ export class WsBackendTransport implements BackendTransport {
             return;
           }
           settled = true;
-          clearTimeout(timeout);
+          this.clearTimeoutImpl(timeout);
           console.log("[ws] Connected to relay server");
           this.connected = true;
           this.reconnecting = false;
           this.reconnectAttempts = 0;
+          this.markConnectSuccess("Connected to relay server.");
           resolve();
         });
 
@@ -162,11 +280,15 @@ export class WsBackendTransport implements BackendTransport {
         });
 
         ws.on("close", (code: number, reason: Buffer) => {
-          clearTimeout(timeout);
+          this.clearTimeoutImpl(timeout);
           const reasonText = reason.toString();
           console.log(`[ws] Connection closed: code=${code}, reason=${reasonText}`);
           if (this.ws !== ws || generation !== this.socketGeneration) {
             return;
+          }
+          if (!settled) {
+            const closeError = reasonText || `Connection closed during handshake (code=${code}).`;
+            failConnect(new Error(closeError));
           }
           this.connected = false;
           this.ws = null;
@@ -176,14 +298,12 @@ export class WsBackendTransport implements BackendTransport {
 
         ws.on("error", (err: Error) => {
           console.error("[ws] WebSocket error:", err.message);
-          if (!settled && this.ws === ws && generation === this.socketGeneration) {
-            settled = true;
-            clearTimeout(timeout);
-            reject(err);
-          }
+          failConnect(err);
         });
       } catch (err) {
-        reject(err);
+        const wrapped = err instanceof Error ? err : new Error(String(err));
+        this.recordConnectFailure(wrapped.message);
+        reject(wrapped);
       }
     });
   }
@@ -206,9 +326,14 @@ export class WsBackendTransport implements BackendTransport {
     const maxLabel = Number.isFinite(this.maxReconnectAttempts)
       ? String(this.maxReconnectAttempts)
       : '∞';
+    if (this.recoveryPhase === "idle") {
+      this.recoveryPhase = "reconnecting";
+      this.recoveryStatus = "degraded";
+      this.recoveryDetail = "WebSocket disconnected. Attempting reconnect with exponential backoff.";
+    }
     console.log(`[ws] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${maxLabel})`);
 
-    this.reconnectTimer = setTimeout(async () => {
+    this.reconnectTimer = this.setTimeoutImpl(async () => {
       this.reconnectTimer = null;
       try {
         await this.connect(this.context!);
@@ -220,6 +345,228 @@ export class WsBackendTransport implements BackendTransport {
       }
       this.reconnecting = false;
     }, delay);
+  }
+
+  getRecoverySnapshot(): TransportRecoverySnapshot {
+    return {
+      supported: true,
+      phase: this.recoveryPhase,
+      status: this.recoveryStatus,
+      detail: this.recoveryDetail,
+      consecutiveFailureThreshold: this.recoveryConsecutiveFailureThreshold,
+      consecutiveConnectFailures: this.consecutiveConnectFailures,
+      consecutiveGatewayRecoveryFailures: this.consecutiveGatewayRecoveryFailures,
+      maxGatewayRecoveryAttempts: this.maxGatewayRecoveryAttempts,
+      reconnectAttempts: this.reconnectAttempts,
+      ...(this.lastConnectSuccessAt ? { lastConnectSuccessAt: this.lastConnectSuccessAt } : {}),
+      ...(this.lastConnectFailureAt ? { lastConnectFailureAt: this.lastConnectFailureAt } : {}),
+      ...(this.lastFailureDetail ? { lastFailureDetail: this.lastFailureDetail } : {}),
+      ...(this.lastSuccessDetail ? { lastSuccessDetail: this.lastSuccessDetail } : {}),
+      ...(this.lastRecoverySuccessAt ? { lastRecoverySuccessAt: this.lastRecoverySuccessAt } : {}),
+      ...(this.lastRecoveryFailureAt ? { lastRecoveryFailureAt: this.lastRecoveryFailureAt } : {}),
+      ...(this.lastGatewayProbe ? { lastGatewayProbe: cloneGatewayProbe(this.lastGatewayProbe) } : {}),
+      recentRecoveryAttempts: this.recentRecoveryAttempts.map((record) => cloneRecoveryAttempt(record))
+    };
+  }
+
+  private markConnectSuccess(detail: string): void {
+    const now = this.now().toISOString();
+    this.consecutiveConnectFailures = 0;
+    this.consecutiveGatewayRecoveryFailures = 0;
+    this.lastConnectSuccessAt = now;
+    this.lastSuccessDetail = detail;
+    this.recoveryPhase = "idle";
+    this.recoveryStatus = "healthy";
+    this.recoveryDetail = detail;
+  }
+
+  private recordConnectFailure(detail: string): void {
+    const normalizedDetail = detail.trim() || "Unknown WebSocket connect error.";
+    this.consecutiveConnectFailures += 1;
+    this.lastConnectFailureAt = this.now().toISOString();
+    this.lastFailureDetail = normalizedDetail;
+
+    if (this.consecutiveConnectFailures < this.recoveryConsecutiveFailureThreshold) {
+      this.recoveryPhase = "reconnecting";
+      this.recoveryStatus = "degraded";
+      this.recoveryDetail =
+        `WebSocket connect failed (${normalizedDetail}). Retrying ` +
+        `(${this.consecutiveConnectFailures}/${this.recoveryConsecutiveFailureThreshold} before diagnosis).`;
+      return;
+    }
+
+    if (this.recoveryInProgress) {
+      this.recoveryPhase = "diagnosing";
+      this.recoveryStatus = "degraded";
+      this.recoveryDetail =
+        `WebSocket connect failures reached ${this.consecutiveConnectFailures}. ` +
+        `Diagnosis already running. Last error: ${normalizedDetail}`;
+      return;
+    }
+
+    this.recoveryPhase = "diagnosing";
+    this.recoveryStatus = "degraded";
+    this.recoveryDetail =
+      `WebSocket connect failed ${this.consecutiveConnectFailures} times consecutively. ` +
+      `Diagnosing local gateway and relay connectivity. Last error: ${normalizedDetail}`;
+    void this.runRecoveryDiagnosis(normalizedDetail);
+  }
+
+  private toRecoveryGatewayProbe(probe: GatewayProbeResult): TransportRecoveryGatewayProbe {
+    return {
+      status: probe.status,
+      ok: probe.ok,
+      detail: probe.detail,
+      checkedAt: probe.checkedAt,
+      endpoint: probe.endpoint,
+      latencyMs: probe.latencyMs,
+      ...(probe.httpStatus !== undefined ? { httpStatus: probe.httpStatus } : {})
+    };
+  }
+
+  private async runRecoveryDiagnosis(lastConnectError: string): Promise<void> {
+    if (this.recoveryInProgress) {
+      return;
+    }
+
+    this.recoveryInProgress = true;
+    const attemptId = this.recoveryAttemptCounter + 1;
+    this.recoveryAttemptCounter = attemptId;
+    const triggeredAt = this.now().toISOString();
+
+    let gatewayProbe: TransportRecoveryGatewayProbe | undefined;
+    let restartExecution: GatewayCommandExecution | undefined;
+    let restartError: string | undefined;
+    let classification: TransportRecoveryAttemptRecord["classification"] = "diagnostic_error";
+    let ok = false;
+    let detail = "";
+
+    try {
+      if (!this.gatewayDetector) {
+        detail = "Gateway detector is not configured for transport diagnostics.";
+        this.recoveryPhase = "manual_attention";
+        this.recoveryStatus = "manual_attention";
+        this.recoveryDetail = `${detail} Cannot distinguish relay outage from local gateway health.`;
+      } else {
+        const probe = await this.gatewayDetector.detect();
+        gatewayProbe = this.toRecoveryGatewayProbe(probe);
+        this.lastGatewayProbe = cloneGatewayProbe(gatewayProbe);
+
+        if (probe.ok) {
+          classification = "relay_unreachable";
+          detail =
+            `Gateway probe is healthy (${probe.detail}), but websocket connect is still failing. ` +
+            `Relay/backend connectivity appears unreachable. Last transport error: ${lastConnectError}`;
+          this.recoveryPhase = "relay_unreachable";
+          this.recoveryStatus = "relay_unreachable";
+          this.recoveryDetail = detail;
+        } else {
+          this.recoveryPhase = "recovering_gateway";
+          this.recoveryStatus = "recovering";
+          this.recoveryDetail =
+            `Gateway probe unhealthy (${probe.detail}). Attempting local recovery via openclaw gateway restart.`;
+
+          if (!this.gatewayCommandRunner) {
+            classification = "gateway_unhealthy_unresolved";
+            detail =
+              `Gateway probe unhealthy (${probe.detail}) but no restart command runner is configured. ` +
+              "Cannot attempt local gateway recovery.";
+          } else {
+            try {
+              restartExecution = await this.gatewayCommandRunner.restart();
+            } catch (error) {
+              restartError = toErrorMessage(error);
+            }
+
+            if (restartError) {
+              classification = "gateway_unhealthy_unresolved";
+              detail = `openclaw gateway restart execution failed: ${restartError}`;
+            } else if (!restartExecution) {
+              classification = "gateway_unhealthy_unresolved";
+              detail = "openclaw gateway restart did not return an execution result.";
+            } else if (restartExecution.exitCode !== 0) {
+              classification = "gateway_unhealthy_unresolved";
+              const signalInfo = restartExecution.signal ? `, signal=${restartExecution.signal}` : "";
+              const stderr = restartExecution.stderr.trim();
+              detail =
+                `openclaw gateway restart exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
+                `${stderr ? `, stderr=${stderr}` : ""}`;
+            } else {
+              const verifiedProbe = await this.gatewayDetector.detect();
+              gatewayProbe = this.toRecoveryGatewayProbe(verifiedProbe);
+              this.lastGatewayProbe = cloneGatewayProbe(gatewayProbe);
+              if (verifiedProbe.ok) {
+                classification = "gateway_unhealthy_recovered";
+                ok = true;
+                detail = "Gateway recovered after openclaw gateway restart. Continuing websocket reconnect.";
+              } else {
+                classification = "gateway_unhealthy_unresolved";
+                detail =
+                  `Restart command succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+              }
+            }
+          }
+
+          if (ok) {
+            this.consecutiveGatewayRecoveryFailures = 0;
+            this.lastRecoverySuccessAt = this.now().toISOString();
+            this.recoveryPhase = "reconnecting";
+            this.recoveryStatus = "degraded";
+            this.recoveryDetail = detail;
+          } else {
+            this.consecutiveGatewayRecoveryFailures += 1;
+            this.lastRecoveryFailureAt = this.now().toISOString();
+            if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
+              this.recoveryPhase = "manual_attention";
+              this.recoveryStatus = "manual_attention";
+              this.recoveryDetail =
+                `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
+                `${this.maxGatewayRecoveryAttempts} failed local gateway recoveries.`;
+            } else {
+              this.recoveryPhase = "reconnecting";
+              this.recoveryStatus = "degraded";
+              this.recoveryDetail = `${detail} Continuing websocket reconnect attempts.`;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      detail = `Transport recovery diagnosis failed: ${toErrorMessage(error)}`;
+      this.recoveryPhase = "reconnecting";
+      this.recoveryStatus = "degraded";
+      this.recoveryDetail = detail;
+    } finally {
+      const completedAt = this.now().toISOString();
+      this.pushRecoveryAttempt({
+        id: attemptId,
+        trigger: "consecutive_connect_failures",
+        triggeredAt,
+        completedAt,
+        consecutiveConnectFailures: this.consecutiveConnectFailures,
+        ok,
+        classification,
+        detail,
+        ...(gatewayProbe ? { gatewayProbe: cloneGatewayProbe(gatewayProbe) } : {}),
+        ...(restartExecution
+          ? {
+              restartCommand: restartExecution.command,
+              restartExitCode: restartExecution.exitCode,
+              restartSignal: restartExecution.signal,
+              restartStdout: restartExecution.stdout,
+              restartStderr: restartExecution.stderr
+            }
+          : {}),
+        ...(restartError ? { restartError } : {})
+      });
+      this.recoveryInProgress = false;
+    }
+  }
+
+  private pushRecoveryAttempt(record: TransportRecoveryAttemptRecord): void {
+    this.recentRecoveryAttempts.unshift(record);
+    if (this.recentRecoveryAttempts.length > this.recoveryHistoryLimit) {
+      this.recentRecoveryAttempts.length = this.recoveryHistoryLimit;
+    }
   }
 
   private handleRelayMessage(payload: Record<string, unknown>): void {
@@ -340,7 +687,7 @@ export class WsBackendTransport implements BackendTransport {
     this.maxReconnectAttempts = 0; // Prevent reconnect on intentional disconnect
     this.intentionalDisconnect = true;
     if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
+      this.clearTimeoutImpl(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     if (this.ws) {
@@ -352,7 +699,7 @@ export class WsBackendTransport implements BackendTransport {
     this.context = null;
 
     for (const waiter of this.waiters) {
-      clearTimeout(waiter.timeout);
+      this.clearTimeoutImpl(waiter.timeout);
       waiter.reject(new Error("Transport disconnected"));
     }
     this.waiters.length = 0;
@@ -410,7 +757,7 @@ export class WsBackendTransport implements BackendTransport {
     }
 
     return new Promise<ConnectorEvent>((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      const timeout = this.setTimeoutImpl(() => {
         this.removeWaiter(resolve);
         reject(
           new Error(
@@ -429,7 +776,7 @@ export class WsBackendTransport implements BackendTransport {
       if (!waiter.predicate(event)) {
         continue;
       }
-      clearTimeout(waiter.timeout);
+      this.clearTimeoutImpl(waiter.timeout);
       this.removeWaiter(waiter.resolve);
       waiter.resolve(event);
     }

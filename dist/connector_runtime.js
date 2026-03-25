@@ -44,6 +44,7 @@ export class ConnectorRuntime {
             generatedAt: this.now().toISOString(),
             gateway,
             gatewayRecovery: this.gatewayWatchdog.getSnapshot(),
+            transportRecovery: this.backendClient.getTransportRecoverySnapshot(),
             registry,
             activeHost,
             todoBoundaries: this.listTodoBoundaries()
