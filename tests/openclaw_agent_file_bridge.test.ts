@@ -94,19 +94,30 @@ describe("OpenClawAgentFileBridgeService", () => {
     }
   });
 
-  test("resolves non-default agent workspace fallback as ~/.openclaw/workspace-<agentId>", async () => {
+  test("uses defaults.workspace as primary fallback when agents.list is absent", async () => {
     const fixture = await createFixture(`{
       "agents": {
-        "list": [
-          { "id": "main", "default": true, "workspace": "${join(tmpdir(), "main-workspace")}" },
-        ],
-      },
+        "defaults": {
+          "workspace": "${join(tmpdir(), "shared-workspace")}" 
+        }
+      }
     }`);
 
     try {
-      const listed = await fixture.bridge.listAgentFiles({ agentId: "Claw-SDE" });
-      expect(listed.agentId).toBe("claw-sde");
-      expect(listed.workspaceDir).toBe(join(fixture.stateDir, "workspace-claw-sde"));
+      await mkdir(fixture.workspaceDir, { recursive: true });
+      await writeFile(fixture.configPath, `{
+        "agents": {
+          "defaults": {
+            "workspace": "${fixture.workspaceDir}"
+          }
+        }
+      }`, 'utf-8');
+      await writeFile(join(fixture.workspaceDir, 'SOUL.md'), 'shared soul', 'utf-8');
+
+      const listed = await fixture.bridge.listAgentFiles({ agentId: 'claw-tax' });
+      expect(listed.agentId).toBe('claw-tax');
+      expect(listed.workspaceDir).toBe(fixture.workspaceDir);
+      expect(indexByBridgePath(listed.files).get('workspace/SOUL.md')?.exists).toBe(true);
     } finally {
       await rm(fixture.tempDir, { recursive: true, force: true });
     }
