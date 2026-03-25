@@ -147,6 +147,24 @@ function printStatusSnapshot(snapshot, registryPath) {
         console.log(`backend url=${snapshot.activeHost.backendUrl}`);
         console.log(`bound at=${snapshot.activeHost.boundAt}`);
     }
+    const gatewayRecovery = snapshot.gatewayRecovery;
+    console.log("");
+    console.log(`gateway recovery phase=${gatewayRecovery.phase}`);
+    console.log(`gateway recovery failures=${gatewayRecovery.consecutiveProbeFailures}/${gatewayRecovery.consecutiveFailureThreshold}`);
+    console.log(`gateway recovery restart failures=${gatewayRecovery.consecutiveRecoveryFailures}/${gatewayRecovery.maxRecoveryAttempts}`);
+    if (gatewayRecovery.nextRecoveryAllowedAt) {
+        console.log(`gateway recovery next retry at=${gatewayRecovery.nextRecoveryAllowedAt}`);
+    }
+    if (gatewayRecovery.lastRecoverySuccessAt) {
+        console.log(`gateway recovery last success at=${gatewayRecovery.lastRecoverySuccessAt}`);
+    }
+    if (gatewayRecovery.lastRecoveryFailureAt) {
+        console.log(`gateway recovery last failure at=${gatewayRecovery.lastRecoveryFailureAt}`);
+    }
+    const recentRecovery = gatewayRecovery.recentRecoveries[0];
+    if (recentRecovery) {
+        console.log(`gateway recovery latest=${recentRecovery.triggeredAt} ok=${recentRecovery.ok} detail=${recentRecovery.detail}`);
+    }
     console.log("");
     console.log("TODO boundaries:");
     for (const boundary of snapshot.todoBoundaries) {
@@ -305,12 +323,12 @@ async function runLifecycleLoop(options) {
     console.log(`connector started for host=${running.host.hostId} via transport=${options.transport.name}`);
     let web;
     if (options.webUi) {
-        const getDiagnosticsSnapshot = () => {
+        const getDiagnosticsSnapshot = async () => {
             const events = options.transport.getSentEvents();
             const lastEvent = events.length > 0 ? events[events.length - 1] : undefined;
             return {
                 generatedAt: new Date().toISOString(),
-                status: statusSnapshot,
+                status: await options.runtime.createStatusSnapshot(),
                 backend: {
                     transport: options.transport.name,
                     connected: options.transport.isConnected(),

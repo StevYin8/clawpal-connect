@@ -8,6 +8,8 @@ import {
   BackendClient,
   ConnectorRuntime,
   GatewayDetector,
+  type GatewayWatchdogLifecycle,
+  type GatewayWatchdogSnapshot,
   HeartbeatManager,
   HostRegistry,
   OpenClawAgentFileRevisionConflictError,
@@ -483,6 +485,82 @@ describe("ConnectorRuntime", () => {
           });
         }
       }
+    } finally {
+      await running?.stop();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("starts and stops gateway watchdog with connector lifecycle", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "clawpal-connector-runtime-"));
+    const registryPath = join(tempDir, "host-registry.json");
+    const registry = new HostRegistry({ filePath: registryPath });
+    await registry.bindHost({
+      hostId: "host-1",
+      userId: "user-1",
+      hostName: "Host 1",
+      backendUrl: "https://relay.example"
+    });
+
+    const transport = new MockBackendTransport();
+    const backendClient = new BackendClient({ transport });
+    const gatewayDetector = new GatewayDetector({
+      baseUrl: "http://127.0.0.1:18789",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+    });
+
+    const lifecycleEvents: string[] = [];
+    const gatewayRecoverySnapshot: GatewayWatchdogSnapshot = {
+      running: false,
+      phase: "stopped",
+      pollIntervalMs: 10_000,
+      consecutiveFailureThreshold: 3,
+      consecutiveProbeFailures: 0,
+      consecutiveRecoveryFailures: 0,
+      maxRecoveryAttempts: 5,
+      restartCooldownMs: 15_000,
+      backoffScheduleMs: [0, 30_000, 120_000, 600_000],
+      restartCommand: "openclaw gateway restart",
+      recentRecoveries: []
+    };
+    const gatewayWatchdog: GatewayWatchdogLifecycle = {
+      start() {
+        lifecycleEvents.push("start");
+        return () => {
+          lifecycleEvents.push("stop");
+        };
+      },
+      stop() {
+        lifecycleEvents.push("stop-direct");
+      },
+      getSnapshot() {
+        return gatewayRecoverySnapshot;
+      }
+    };
+
+    const runtime = new ConnectorRuntime({
+      hostRegistry: registry,
+      gatewayDetector,
+      backendClient,
+      gatewayWatchdog
+    });
+
+    let running: Awaited<ReturnType<ConnectorRuntime["start"]>> | undefined;
+    try {
+      const snapshot = await runtime.createStatusSnapshot();
+      expect(snapshot.gatewayRecovery.phase).toBe("stopped");
+      expect(snapshot.gatewayRecovery.restartCommand).toBe("openclaw gateway restart");
+
+      running = await runtime.start();
+      expect(lifecycleEvents).toEqual(["start"]);
+
+      await running.stop();
+      running = undefined;
+      expect(lifecycleEvents).toEqual(["start", "stop"]);
     } finally {
       await running?.stop();
       await rm(tempDir, { recursive: true, force: true });
