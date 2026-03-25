@@ -168,6 +168,7 @@ interface ResolvedAgentContext {
   stateDir: string;
   configPath: string;
   workspaceDir: string;
+  workspaceDirs: string[];
 }
 
 interface ResolvedBridgeFileTarget {
@@ -338,24 +339,36 @@ function resolveDefaultAgentId(config: OpenClawConfigLike): string {
   return normalizeAgentId(normalizeOptionalString(defaultEntry?.id) ?? normalizeOptionalString(entries[0]?.id));
 }
 
-function resolveAgentWorkspaceDir(config: OpenClawConfigLike, stateDir: string, agentId: string): string {
+function resolveAgentWorkspaceDirs(config: OpenClawConfigLike, stateDir: string, agentId: string): string[] {
   const normalizedAgentId = normalizeAgentId(agentId);
   const entries = listAgentEntries(config);
   const agentEntry = entries.find((entry) => normalizeAgentId(normalizeOptionalString(entry.id)) === normalizedAgentId);
   const explicitWorkspace = normalizeOptionalString(agentEntry?.workspace);
-  if (explicitWorkspace) {
-    return stripNullBytes(resolveUserPath(explicitWorkspace));
-  }
+  const defaultWorkspace = normalizeOptionalString(config.agents?.defaults?.workspace);
+  const candidates: string[] = [];
 
-  if (normalizedAgentId === resolveDefaultAgentId(config)) {
-    const defaultWorkspace = normalizeOptionalString(config.agents?.defaults?.workspace);
-    if (defaultWorkspace) {
-      return stripNullBytes(resolveUserPath(defaultWorkspace));
+  const pushCandidate = (value?: string | null): void => {
+    const normalized = normalizeOptionalString(value);
+    if (!normalized) {
+      return;
     }
-    return stripNullBytes(join(stateDir, "workspace"));
+    const resolved = stripNullBytes(resolveUserPath(normalized));
+    if (!candidates.includes(resolved)) {
+      candidates.push(resolved);
+    }
+  };
+
+  pushCandidate(explicitWorkspace);
+  pushCandidate(defaultWorkspace);
+  pushCandidate(join(stateDir, `workspace-${normalizedAgentId}`));
+  if (normalizedAgentId === resolveDefaultAgentId(config) || entries.length === 0) {
+    pushCandidate(join(stateDir, 'workspace'));
   }
 
-  return stripNullBytes(join(stateDir, `workspace-${normalizedAgentId}`));
+  if (candidates.length === 0) {
+    pushCandidate(join(stateDir, 'workspace'));
+  }
+  return candidates;
 }
 
 function categorizeWorkspaceRootFile(name: string): OpenClawAgentFileCategory {
@@ -742,7 +755,9 @@ export class OpenClawAgentFileBridgeService {
     const targetsByPath = new Map<string, ResolvedBridgeFileTarget>();
 
     const addTarget = (target: ResolvedBridgeFileTarget): void => {
-      targetsByPath.set(target.bridgePath, target);
+      if (!targetsByPath.has(target.bridgePath)) {
+        targetsByPath.set(target.bridgePath, target);
+      }
     };
 
     addTarget({
@@ -753,33 +768,35 @@ export class OpenClawAgentFileBridgeService {
       rootDir: dirname(this.configPath)
     });
 
-    for (const fileName of WORKSPACE_ROOT_FILES) {
-      addTarget({
-        bridgePath: `workspace/${fileName}`,
-        absolutePath: join(context.workspaceDir, fileName),
-        domain: "workspace",
-        category: categorizeWorkspaceRootFile(fileName),
-        rootDir: context.workspaceDir
-      });
-    }
+    for (const workspaceDir of context.workspaceDirs) {
+      for (const fileName of WORKSPACE_ROOT_FILES) {
+        addTarget({
+          bridgePath: `workspace/${fileName}`,
+          absolutePath: join(workspaceDir, fileName),
+          domain: "workspace",
+          category: categorizeWorkspaceRootFile(fileName),
+          rootDir: workspaceDir
+        });
+      }
 
-    const memoryDir = join(context.workspaceDir, "memory");
-    for (const absolutePath of await listMarkdownFiles(memoryDir)) {
-      addTarget({
-        bridgePath: `workspace/memory/${toNormalizedRelativePath(memoryDir, absolutePath)}`,
-        absolutePath,
-        domain: "workspace-memory",
-        category: "memory",
-        rootDir: context.workspaceDir
-      });
-    }
+      const memoryDir = join(workspaceDir, "memory");
+      for (const absolutePath of await listMarkdownFiles(memoryDir)) {
+        addTarget({
+          bridgePath: `workspace/memory/${toNormalizedRelativePath(memoryDir, absolutePath)}`,
+          absolutePath,
+          domain: "workspace-memory",
+          category: "memory",
+          rootDir: workspaceDir
+        });
+      }
 
-    for (const target of await loadSkillTargets(
-      join(context.workspaceDir, "skills"),
-      "workspace/skills",
-      "workspace-skill"
-    )) {
-      addTarget(target);
+      for (const target of await loadSkillTargets(
+        join(workspaceDir, "skills"),
+        "workspace/skills",
+        "workspace-skill"
+      )) {
+        addTarget(target);
+      }
     }
 
     for (const target of await loadSkillTargets(join(this.stateDir, "skills"), "shared-skills", "shared-skill")) {
@@ -993,11 +1010,13 @@ export class OpenClawAgentFileBridgeService {
     const config = await this.readConfig();
     const normalizedAgentId = normalizeAgentId(agentId ?? resolveDefaultAgentId(config));
 
+    const workspaceDirs = resolveAgentWorkspaceDirs(config, this.stateDir, normalizedAgentId);
     return {
       agentId: normalizedAgentId,
       stateDir: this.stateDir,
       configPath: this.configPath,
-      workspaceDir: resolveAgentWorkspaceDir(config, this.stateDir, normalizedAgentId)
+      workspaceDir: workspaceDirs[0] ?? stripNullBytes(join(this.stateDir, 'workspace')),
+      workspaceDirs
     };
   }
 
