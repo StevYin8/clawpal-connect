@@ -1,3 +1,17 @@
+export function createUnsupportedTransportRecoverySnapshot(detail = "Transport does not expose recovery diagnostics.") {
+    return {
+        supported: false,
+        phase: "unsupported",
+        status: "unsupported",
+        detail,
+        consecutiveFailureThreshold: 0,
+        consecutiveConnectFailures: 0,
+        consecutiveGatewayRecoveryFailures: 0,
+        maxGatewayRecoveryAttempts: 0,
+        reconnectAttempts: 0,
+        recentRecoveryAttempts: []
+    };
+}
 export class BackendClient {
     transport;
     now;
@@ -30,6 +44,9 @@ export class BackendClient {
     }
     isConnected() {
         return this.connected;
+    }
+    getTransportRecoverySnapshot() {
+        return this.transport.getRecoverySnapshot?.() ?? createUnsupportedTransportRecoverySnapshot();
     }
     onForwardedRequest(listener) {
         this.chatRequestListeners.add(listener);

@@ -5,7 +5,8 @@ import type {
   AgentFilesResponseError,
   AgentFilesResponseOkEvent,
   AgentFilesSetRequestPayload,
-  ForwardedFileRequest
+  ForwardedFileRequest,
+  TransportRecoverySnapshot
 } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
@@ -34,6 +35,7 @@ export interface ConnectorStatusSnapshot {
   generatedAt: string;
   gateway: GatewayProbeResult;
   gatewayRecovery: GatewayWatchdogSnapshot;
+  transportRecovery: TransportRecoverySnapshot;
   registry: HostRegistryState;
   activeHost: RegisteredHost | null;
   todoBoundaries: string[];
@@ -101,6 +103,7 @@ export class ConnectorRuntime {
       generatedAt: this.now().toISOString(),
       gateway,
       gatewayRecovery: this.gatewayWatchdog.getSnapshot(),
+      transportRecovery: this.backendClient.getTransportRecoverySnapshot(),
       registry,
       activeHost,
       todoBoundaries: this.listTodoBoundaries()

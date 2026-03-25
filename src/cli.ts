@@ -448,9 +448,11 @@ async function createRuntimeForWsLifecycle(
     throw new Error("--backend-url is required when using --transport ws");
   }
 
-  const transport = new WsBackendTransport();
-  const registry = buildHostRegistry(options);
   const gatewayDetector = await buildGatewayDetector(options);
+  const transport = new WsBackendTransport({
+    gatewayDetector
+  });
+  const registry = buildHostRegistry(options);
 
   let activeHost = await registry.getActiveHost();
   if (!activeHost && overrides.autoBindDefaultHost) {
