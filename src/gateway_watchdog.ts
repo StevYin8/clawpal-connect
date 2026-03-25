@@ -11,6 +11,7 @@ type SpawnOpenClawProcess = (
 type IntervalHandle = ReturnType<typeof setInterval>;
 
 type GatewayLifecycleCommand = "status" | "start" | "stop" | "restart";
+type OpenClawRuntimeTarget = "gateway" | "node";
 
 type GatewayRecoveryTrigger = "consecutive_probe_failures";
 
@@ -26,6 +27,7 @@ export interface GatewayCommandExecution {
   startedAt: string;
   completedAt: string;
   durationMs: number;
+  runtimeTarget?: OpenClawRuntimeTarget;
 }
 
 export interface GatewayCommandRunner {
@@ -99,6 +101,7 @@ export interface GatewayWatchdogOptions {
 }
 
 const DEFAULT_OPENCLAW_BINARY = "openclaw";
+const DEFAULT_RUNTIME_RESTART_COMMAND = "openclaw auto-runtime restart";
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const DEFAULT_CONSECUTIVE_FAILURE_THRESHOLD = 3;
 const DEFAULT_MAX_RECOVERY_ATTEMPTS = 5;
@@ -162,6 +165,22 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
+function executionOutput(result: GatewayCommandExecution): string {
+  return `${result.stdout}\n${result.stderr}`.trim();
+}
+
+function isRuntimeInstalled(result: GatewayCommandExecution): boolean {
+  const output = executionOutput(result).toLowerCase();
+  return !output.includes("service unit not found") && !output.includes("service not installed");
+}
+
+function isRuntimeActive(result: GatewayCommandExecution, target: OpenClawRuntimeTarget): boolean {
+  const output = executionOutput(result).toLowerCase();
+  const commandHint = target === "node" ? " node run" : " gateway --port";
+  const hasMatchingCommand = output.includes(commandHint);
+  return hasMatchingCommand && (output.includes("runtime: running") || output.includes("service: launchagent (loaded)"));
+}
+
 export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
   private readonly openClawBinary: string;
   private readonly spawnImpl: SpawnOpenClawProcess;
@@ -177,23 +196,89 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
   }
 
   async status(): Promise<GatewayCommandExecution> {
-    return await this.run("status");
+    const inspection = await this.inspectRuntimeTarget();
+    return inspection.activeStatus ?? inspection.preferredStatus;
   }
 
   async start(): Promise<GatewayCommandExecution> {
-    return await this.run("start");
+    const inspection = await this.inspectRuntimeTarget();
+    return await this.runForTarget(inspection.preferredTarget, "start");
   }
 
   async stop(): Promise<GatewayCommandExecution> {
-    return await this.run("stop");
+    const inspection = await this.inspectRuntimeTarget();
+    return await this.runForTarget(inspection.preferredTarget, "stop");
   }
 
   async restart(): Promise<GatewayCommandExecution> {
-    return await this.run("restart");
+    const inspection = await this.inspectRuntimeTarget();
+    return await this.runForTarget(inspection.preferredTarget, "restart");
   }
 
-  private async run(command: GatewayLifecycleCommand): Promise<GatewayCommandExecution> {
-    const args = ["gateway", command];
+  private async inspectRuntimeTarget(): Promise<{
+    preferredTarget: OpenClawRuntimeTarget;
+    preferredStatus: GatewayCommandExecution;
+    activeStatus?: GatewayCommandExecution;
+  }> {
+    const [gatewayStatus, nodeStatus] = await Promise.all([
+      this.runForTarget("gateway", "status"),
+      this.runForTarget("node", "status")
+    ]);
+
+    const gatewayActive = isRuntimeActive(gatewayStatus, "gateway");
+    const nodeActive = isRuntimeActive(nodeStatus, "node");
+    if (nodeActive && !gatewayActive) {
+      return {
+        preferredTarget: "node",
+        preferredStatus: nodeStatus,
+        activeStatus: nodeStatus
+      };
+    }
+    if (gatewayActive && !nodeActive) {
+      return {
+        preferredTarget: "gateway",
+        preferredStatus: gatewayStatus,
+        activeStatus: gatewayStatus
+      };
+    }
+    if (nodeActive) {
+      return {
+        preferredTarget: "node",
+        preferredStatus: nodeStatus,
+        activeStatus: nodeStatus
+      };
+    }
+    if (gatewayActive) {
+      return {
+        preferredTarget: "gateway",
+        preferredStatus: gatewayStatus,
+        activeStatus: gatewayStatus
+      };
+    }
+
+    const nodeInstalled = isRuntimeInstalled(nodeStatus);
+    const gatewayInstalled = isRuntimeInstalled(gatewayStatus);
+    if (nodeInstalled && !gatewayInstalled) {
+      return {
+        preferredTarget: "node",
+        preferredStatus: nodeStatus
+      };
+    }
+    if (gatewayInstalled && !nodeInstalled) {
+      return {
+        preferredTarget: "gateway",
+        preferredStatus: gatewayStatus
+      };
+    }
+
+    return {
+      preferredTarget: "node",
+      preferredStatus: nodeStatus
+    };
+  }
+
+  private async runForTarget(target: OpenClawRuntimeTarget, command: GatewayLifecycleCommand): Promise<GatewayCommandExecution> {
+    const args = [target, command];
     const startedMs = Date.now();
     const startedAt = new Date(startedMs).toISOString();
 
@@ -228,7 +313,8 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
           signal,
           startedAt,
           completedAt: new Date(completedMs).toISOString(),
-          durationMs: completedMs - startedMs
+          durationMs: completedMs - startedMs,
+          runtimeTarget: target
         });
       });
     });
@@ -316,7 +402,7 @@ export class GatewayWatchdog implements GatewayWatchdogLifecycle {
       maxRecoveryAttempts: this.maxRecoveryAttempts,
       restartCooldownMs: this.restartCooldownMs,
       backoffScheduleMs: [...this.backoffScheduleMs],
-      restartCommand: "openclaw gateway restart",
+      restartCommand: DEFAULT_RUNTIME_RESTART_COMMAND,
       ...(this.lastProbe ? { lastProbe: cloneGatewayProbeResult(this.lastProbe) } : {}),
       ...(this.nextRecoveryAllowedAtMs !== null
         ? { nextRecoveryAllowedAt: new Date(this.nextRecoveryAllowedAtMs).toISOString() }
@@ -429,20 +515,20 @@ export class GatewayWatchdog implements GatewayWatchdogLifecycle {
     }
 
     if (restartError) {
-      detail = `openclaw gateway restart execution failed: ${restartError}`;
+      detail = `${restartError}`;
     } else if (!restart) {
-      detail = "openclaw gateway restart did not return an execution result.";
+      detail = "Runtime restart did not return an execution result.";
     } else if (restart.exitCode !== 0) {
       const signalInfo = restart.signal ? `, signal=${restart.signal}` : "";
       const stderr = restart.stderr.trim();
-      detail = `openclaw gateway restart exited with code ${String(restart.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
+      detail = `${restart.command} exited with code ${String(restart.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
     } else {
       verifiedProbe = await this.gatewayDetector.detect();
       this.lastProbe = cloneGatewayProbeResult(verifiedProbe);
       ok = verifiedProbe.ok;
       detail = ok
-        ? "Gateway recovered after `openclaw gateway restart`."
-        : `Restart command succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+        ? `Gateway recovered after ${restart.command}.`
+        : `${restart.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
     }
 
     const completedAt = this.now().toISOString();

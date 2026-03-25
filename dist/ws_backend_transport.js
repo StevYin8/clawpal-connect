@@ -379,7 +379,7 @@ export class WsBackendTransport {
                     this.recoveryPhase = "recovering_gateway";
                     this.recoveryStatus = "recovering";
                     this.recoveryDetail =
-                        `Gateway probe unhealthy (${probe.detail}). Attempting local recovery via openclaw gateway restart.`;
+                        `Gateway probe unhealthy (${probe.detail}). Attempting local OpenClaw runtime recovery.`;
                     if (!this.gatewayCommandRunner) {
                         classification = "gateway_unhealthy_unresolved";
                         detail =
@@ -395,18 +395,18 @@ export class WsBackendTransport {
                         }
                         if (restartError) {
                             classification = "gateway_unhealthy_unresolved";
-                            detail = `openclaw gateway restart execution failed: ${restartError}`;
+                            detail = restartError;
                         }
                         else if (!restartExecution) {
                             classification = "gateway_unhealthy_unresolved";
-                            detail = "openclaw gateway restart did not return an execution result.";
+                            detail = "Runtime restart did not return an execution result.";
                         }
                         else if (restartExecution.exitCode !== 0) {
                             classification = "gateway_unhealthy_unresolved";
                             const signalInfo = restartExecution.signal ? `, signal=${restartExecution.signal}` : "";
                             const stderr = restartExecution.stderr.trim();
                             detail =
-                                `openclaw gateway restart exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
+                                `${restartExecution.command} exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
                                     `${stderr ? `, stderr=${stderr}` : ""}`;
                         }
                         else {
@@ -416,12 +416,12 @@ export class WsBackendTransport {
                             if (verifiedProbe.ok) {
                                 classification = "gateway_unhealthy_recovered";
                                 ok = true;
-                                detail = "Gateway recovered after openclaw gateway restart. Continuing websocket reconnect.";
+                                detail = `Gateway recovered after ${restartExecution.command}. Continuing websocket reconnect.`;
                             }
                             else {
                                 classification = "gateway_unhealthy_unresolved";
                                 detail =
-                                    `Restart command succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+                                    `${restartExecution.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
                             }
                         }
                     }

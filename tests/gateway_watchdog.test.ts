@@ -1,8 +1,9 @@
 import { describe, expect, test } from "vitest";
+import { EventEmitter } from "node:events";
 
 import type { GatewayProbeResult } from "../src/gateway_detector.js";
 import type { GatewayCommandExecution, GatewayCommandRunner, GatewayWatchdogSnapshot } from "../src/gateway_watchdog.js";
-import { GatewayWatchdog } from "../src/gateway_watchdog.js";
+import { GatewayWatchdog, OpenClawGatewayCommandRunner } from "../src/gateway_watchdog.js";
 
 function createProbe(overrides: Partial<GatewayProbeResult>): GatewayProbeResult {
   return {
@@ -32,6 +33,25 @@ function createCommandExecution(
     completedAt: startedAt,
     durationMs: 0,
     ...overrides
+  };
+}
+
+function createSpawnResult(stdout: string) {
+  return () => {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter & { setEncoding: (encoding: string) => void };
+      stderr: EventEmitter & { setEncoding: (encoding: string) => void };
+      once: (event: string, listener: (...args: any[]) => void) => any;
+    };
+    child.stdout = new EventEmitter() as EventEmitter & { setEncoding: (encoding: string) => void };
+    child.stderr = new EventEmitter() as EventEmitter & { setEncoding: (encoding: string) => void };
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    queueMicrotask(() => {
+      child.stdout.emit("data", stdout);
+      child.emit("close", 0, null);
+    });
+    return child as any;
   };
 }
 
@@ -205,5 +225,28 @@ describe("GatewayWatchdog", () => {
     expect(finalSnapshot?.consecutiveRecoveryFailures).toBe(3);
     expect(finalSnapshot?.recentRecoveries.length).toBe(3);
     expect(finalSnapshot?.recentRecoveries.every((record) => !record.ok)).toBe(true);
+  });
+
+  test("prefers node runtime restart when node service is active", async () => {
+    const outputs = new Map<string, string>([
+      ["gateway status", "Service: LaunchAgent (not loaded)\nRuntime: unknown\nService not installed. Run: openclaw gateway install\n"],
+      ["node status", "Service: LaunchAgent (loaded)\nCommand: /opt/homebrew/bin/node /opt/homebrew/lib/node_modules/openclaw/dist/index.js node run --host 127.0.0.1 --port 18789\nRuntime: running (pid 123, state active)\n"],
+      ["node restart", "Restarted LaunchAgent: gui/501/ai.openclaw.node\n"],
+      ["gateway restart", "should-not-run\n"]
+    ]);
+    const seen: string[] = [];
+    const runner = new OpenClawGatewayCommandRunner({
+      spawnImpl: (_command, args) => {
+        const key = `${args[0]} ${args[1]}`;
+        seen.push(key);
+        return createSpawnResult(outputs.get(key) ?? "")();
+      }
+    });
+
+    const result = await runner.restart();
+
+    expect(result.runtimeTarget).toBe("node");
+    expect(result.command).toBe("openclaw node restart");
+    expect(seen).toEqual(["gateway status", "node status", "node restart"]);
   });
 });
