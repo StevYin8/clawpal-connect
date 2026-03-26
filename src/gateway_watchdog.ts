@@ -37,6 +37,10 @@ export interface GatewayCommandRunner {
   restart(): Promise<GatewayCommandExecution>;
 }
 
+export interface PairingCommandRunner {
+  approveLocalNodeUpgrade(): Promise<GatewayCommandExecution | undefined>;
+}
+
 export interface OpenClawGatewayCommandRunnerOptions {
   openClawBinary?: string;
   spawnImpl?: SpawnOpenClawProcess;
@@ -181,6 +185,23 @@ function isRuntimeActive(result: GatewayCommandExecution, target: OpenClawRuntim
   return hasMatchingCommand && (output.includes("runtime: running") || output.includes("service: launchagent (loaded)"));
 }
 
+interface DeviceListJson {
+  pending?: Array<Record<string, unknown>>;
+  paired?: Array<Record<string, unknown>>;
+}
+
+function parseDeviceListJson(stdout: string): DeviceListJson | undefined {
+  const normalized = stdout.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(normalized) as DeviceListJson;
+  } catch {
+    return undefined;
+  }
+}
+
 export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
   private readonly openClawBinary: string;
   private readonly spawnImpl: SpawnOpenClawProcess;
@@ -315,6 +336,88 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
           completedAt: new Date(completedMs).toISOString(),
           durationMs: completedMs - startedMs,
           runtimeTarget: target
+        });
+      });
+    });
+  }
+}
+
+export class OpenClawDevicePairingCommandRunner implements PairingCommandRunner {
+  private readonly openClawBinary: string;
+  private readonly spawnImpl: SpawnOpenClawProcess;
+  private readonly env: NodeJS.ProcessEnv;
+
+  constructor(options: OpenClawGatewayCommandRunnerOptions = {}) {
+    this.openClawBinary = options.openClawBinary?.trim() || DEFAULT_OPENCLAW_BINARY;
+    this.spawnImpl =
+      options.spawnImpl ??
+      ((command: string, args: readonly string[], spawnOptions: SpawnOptions) =>
+        spawn(command, [...args], spawnOptions) as ChildProcessWithoutNullStreams);
+    this.env = options.env ?? process.env;
+  }
+
+  async approveLocalNodeUpgrade(): Promise<GatewayCommandExecution | undefined> {
+    const listed = await this.runRaw(["devices", "list", "--json"]);
+    const parsed = parseDeviceListJson(listed.stdout);
+    if (!parsed) {
+      return undefined;
+    }
+
+    const paired = Array.isArray(parsed.paired) ? parsed.paired : [];
+    const pending = Array.isArray(parsed.pending) ? parsed.pending : [];
+    const localOperatorDeviceIds = new Set(
+      paired
+        .filter((entry) => entry.clientId === "cli" && entry.role === "operator")
+        .map((entry) => String(entry.deviceId ?? "").trim())
+        .filter((value) => value.length > 0)
+    );
+
+    const candidate = pending
+      .filter((entry) => entry.clientId === "node-host" && entry.role === "node")
+      .filter((entry) => localOperatorDeviceIds.has(String(entry.deviceId ?? "").trim()))
+      .sort((left, right) => Number(right.ts ?? 0) - Number(left.ts ?? 0))[0];
+
+    const requestId = String(candidate?.requestId ?? "").trim();
+    if (!requestId) {
+      return undefined;
+    }
+
+    return await this.runRaw(["devices", "approve", requestId, "--json"]);
+  }
+
+  private async runRaw(args: string[]): Promise<GatewayCommandExecution> {
+    const startedMs = Date.now();
+    const startedAt = new Date(startedMs).toISOString();
+
+    return await new Promise<GatewayCommandExecution>((resolve, reject) => {
+      const child = this.spawnImpl(this.openClawBinary, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: this.env
+      });
+
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf-8");
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.setEncoding("utf-8");
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      child.once("error", reject);
+      child.once("close", (exitCode, signal) => {
+        const completedMs = Date.now();
+        resolve({
+          command: `${this.openClawBinary} ${args.join(" ")}`,
+          args: [...args],
+          stdout,
+          stderr,
+          exitCode,
+          signal,
+          startedAt,
+          completedAt: new Date(completedMs).toISOString(),
+          durationMs: completedMs - startedMs
         });
       });
     });

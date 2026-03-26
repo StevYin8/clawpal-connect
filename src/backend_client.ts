@@ -177,6 +177,7 @@ export type TransportRecoveryPhase =
   | "reconnecting"
   | "diagnosing"
   | "recovering_gateway"
+  | "waiting_for_pairing"
   | "relay_unreachable"
   | "manual_attention";
 
@@ -185,6 +186,7 @@ export type TransportRecoveryStatus =
   | "healthy"
   | "degraded"
   | "recovering"
+  | "pairing_required"
   | "relay_unreachable"
   | "manual_attention";
 
@@ -192,6 +194,8 @@ export type TransportRecoveryAttemptClassification =
   | "relay_unreachable"
   | "gateway_unhealthy_recovered"
   | "gateway_unhealthy_unresolved"
+  | "pairing_required_approved"
+  | "pairing_required_unresolved"
   | "diagnostic_error";
 
 export interface TransportRecoveryGatewayProbe {
@@ -220,6 +224,12 @@ export interface TransportRecoveryAttemptRecord {
   restartStdout?: string;
   restartStderr?: string;
   restartError?: string;
+  approvalCommand?: string;
+  approvalExitCode?: number | null;
+  approvalSignal?: NodeJS.Signals | null;
+  approvalStdout?: string;
+  approvalStderr?: string;
+  approvalError?: string;
 }
 
 export interface TransportRecoverySnapshot {
