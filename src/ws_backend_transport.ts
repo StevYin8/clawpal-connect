@@ -17,7 +17,13 @@ import type {
   TransportRecoverySnapshot
 } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
-import { OpenClawGatewayCommandRunner, type GatewayCommandExecution, type GatewayCommandRunner } from "./gateway_watchdog.js";
+import {
+  OpenClawDevicePairingCommandRunner,
+  OpenClawGatewayCommandRunner,
+  type GatewayCommandExecution,
+  type GatewayCommandRunner,
+  type PairingCommandRunner
+} from "./gateway_watchdog.js";
 
 interface EventWaiter {
   predicate: (event: ConnectorEvent) => boolean;
@@ -33,6 +39,7 @@ interface GatewayProbeDetector {
 export interface WsBackendTransportOptions {
   gatewayDetector?: GatewayProbeDetector;
   gatewayCommandRunner?: GatewayCommandRunner;
+  pairingCommandRunner?: PairingCommandRunner;
   connectTimeoutMs?: number;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
@@ -75,6 +82,11 @@ function normalizeNonNegativeInt(value: number | undefined, fallback: number): n
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isPairingRequiredError(detail: string): boolean {
+  const normalized = detail.toLowerCase();
+  return normalized.includes("pairing required") || normalized.includes("role-upgrade") || normalized.includes("not paired");
 }
 
 function cloneGatewayProbe(probe: TransportRecoveryGatewayProbe): TransportRecoveryGatewayProbe {
@@ -141,6 +153,7 @@ export class WsBackendTransport implements BackendTransport {
 
   private readonly gatewayDetector: GatewayProbeDetector | undefined;
   private readonly gatewayCommandRunner: GatewayCommandRunner | undefined;
+  private readonly pairingCommandRunner: PairingCommandRunner | undefined;
   private readonly connectTimeoutMs: number;
   private readonly reconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
@@ -186,6 +199,7 @@ export class WsBackendTransport implements BackendTransport {
     this.gatewayDetector = options.gatewayDetector;
     this.gatewayCommandRunner =
       options.gatewayCommandRunner ?? (this.gatewayDetector ? new OpenClawGatewayCommandRunner() : undefined);
+    this.pairingCommandRunner = options.pairingCommandRunner ?? new OpenClawDevicePairingCommandRunner();
     this.connectTimeoutMs = normalizePositiveInt(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS);
     this.reconnectDelayMs = normalizePositiveInt(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
     this.maxReconnectDelayMs = normalizePositiveInt(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS);
@@ -437,12 +451,71 @@ export class WsBackendTransport implements BackendTransport {
     let gatewayProbe: TransportRecoveryGatewayProbe | undefined;
     let restartExecution: GatewayCommandExecution | undefined;
     let restartError: string | undefined;
+    let approvalExecution: GatewayCommandExecution | undefined;
+    let approvalError: string | undefined;
     let classification: TransportRecoveryAttemptRecord["classification"] = "diagnostic_error";
     let ok = false;
     let detail = "";
 
     try {
-      if (!this.gatewayDetector) {
+      if (isPairingRequiredError(lastConnectError)) {
+        this.recoveryPhase = "waiting_for_pairing";
+        this.recoveryStatus = "pairing_required";
+        this.recoveryDetail =
+          `Detected pairing/role-upgrade requirement from transport error: ${lastConnectError}. ` +
+          "Attempting local node-host approval.";
+
+        if (!this.pairingCommandRunner) {
+          classification = "pairing_required_unresolved";
+          detail = "Pairing approval runner is not configured.";
+        } else {
+          try {
+            approvalExecution = await this.pairingCommandRunner.approveLocalNodeUpgrade();
+          } catch (error) {
+            approvalError = toErrorMessage(error);
+          }
+
+          if (approvalError) {
+            classification = "pairing_required_unresolved";
+            detail = approvalError;
+          } else if (!approvalExecution) {
+            classification = "pairing_required_unresolved";
+            detail =
+              "Detected pairing required, but no matching local node-host pending request was found for auto-approval.";
+          } else if (approvalExecution.exitCode !== 0) {
+            classification = "pairing_required_unresolved";
+            const signalInfo = approvalExecution.signal ? `, signal=${approvalExecution.signal}` : "";
+            const stderr = approvalExecution.stderr.trim();
+            detail = `${approvalExecution.command} exited with code ${String(approvalExecution.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
+          } else {
+            classification = "pairing_required_approved";
+            ok = true;
+            detail = `${approvalExecution.command} succeeded. Continuing websocket reconnect.`;
+          }
+        }
+
+        if (ok) {
+          this.consecutiveGatewayRecoveryFailures = 0;
+          this.lastRecoverySuccessAt = this.now().toISOString();
+          this.recoveryPhase = "reconnecting";
+          this.recoveryStatus = "degraded";
+          this.recoveryDetail = detail;
+        } else {
+          this.consecutiveGatewayRecoveryFailures += 1;
+          this.lastRecoveryFailureAt = this.now().toISOString();
+          if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
+            this.recoveryPhase = "manual_attention";
+            this.recoveryStatus = "manual_attention";
+            this.recoveryDetail =
+              `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
+              `${this.maxGatewayRecoveryAttempts} failed pairing recoveries.`;
+          } else {
+            this.recoveryPhase = "waiting_for_pairing";
+            this.recoveryStatus = "pairing_required";
+            this.recoveryDetail = `${detail} Continuing websocket reconnect attempts.`;
+          }
+        }
+      } else if (!this.gatewayDetector) {
         detail = "Gateway detector is not configured for transport diagnostics.";
         this.recoveryPhase = "manual_attention";
         this.recoveryStatus = "manual_attention";
@@ -556,7 +629,17 @@ export class WsBackendTransport implements BackendTransport {
               restartStderr: restartExecution.stderr
             }
           : {}),
-        ...(restartError ? { restartError } : {})
+        ...(restartError ? { restartError } : {}),
+        ...(approvalExecution
+          ? {
+              approvalCommand: approvalExecution.command,
+              approvalExitCode: approvalExecution.exitCode,
+              approvalSignal: approvalExecution.signal,
+              approvalStdout: approvalExecution.stdout,
+              approvalStderr: approvalExecution.stderr
+            }
+          : {}),
+        ...(approvalError ? { approvalError } : {})
       });
       this.recoveryInProgress = false;
     }

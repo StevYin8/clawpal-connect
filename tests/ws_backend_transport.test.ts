@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { ForwardedFileRequest } from "../src/backend_client.js";
+import type { PairingCommandRunner } from "../src/gateway_watchdog.js";
 import { WsBackendTransport, resolveRelayWsBaseUrl } from "../src/ws_backend_transport.js";
 
 describe("resolveRelayWsBaseUrl", () => {
@@ -70,5 +71,39 @@ describe("resolveRelayWsBaseUrl", () => {
     });
 
     expect(callCount).toBe(0);
+  });
+
+  test("auto-approves local node-host pairing upgrade before further recovery", async () => {
+    const approvals: string[] = [];
+    const pairingCommandRunner: PairingCommandRunner = {
+      async approveLocalNodeUpgrade() {
+        approvals.push("approve");
+        return {
+          command: "openclaw devices approve req-node-1 --json",
+          args: ["devices", "approve", "req-node-1", "--json"],
+          stdout: '{"ok":true}',
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+          startedAt: "2026-03-26T01:00:00.000Z",
+          completedAt: "2026-03-26T01:00:01.000Z",
+          durationMs: 1000
+        };
+      }
+    };
+    const transport = new WsBackendTransport({ pairingCommandRunner });
+
+    await (transport as unknown as {
+      runRecoveryDiagnosis: (lastConnectError: string) => Promise<void>;
+    }).runRecoveryDiagnosis("Connection closed during handshake (code=1008): pairing required");
+
+    const snapshot = transport.getRecoverySnapshot();
+    expect(approvals).toEqual(["approve"]);
+    expect(snapshot.status).toBe("degraded");
+    expect(snapshot.phase).toBe("reconnecting");
+    expect(snapshot.recentRecoveryAttempts[0]?.classification).toBe("pairing_required_approved");
+    expect(snapshot.recentRecoveryAttempts[0]?.approvalCommand).toBe(
+      "openclaw devices approve req-node-1 --json"
+    );
   });
 });

@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 
 import type { GatewayProbeResult } from "../src/gateway_detector.js";
 import type { GatewayCommandExecution, GatewayCommandRunner, GatewayWatchdogSnapshot } from "../src/gateway_watchdog.js";
-import { GatewayWatchdog, OpenClawGatewayCommandRunner } from "../src/gateway_watchdog.js";
+import { GatewayWatchdog, OpenClawDevicePairingCommandRunner, OpenClawGatewayCommandRunner } from "../src/gateway_watchdog.js";
 
 function createProbe(overrides: Partial<GatewayProbeResult>): GatewayProbeResult {
   return {
@@ -248,5 +248,45 @@ describe("GatewayWatchdog", () => {
     expect(result.runtimeTarget).toBe("node");
     expect(result.command).toBe("openclaw node restart");
     expect(seen).toEqual(["gateway status", "node status", "node restart"]);
+  });
+
+  test("approves matching local node-host upgrade when pairing is pending", async () => {
+    const outputs = new Map<string, string>([
+      [
+        "devices list --json",
+        JSON.stringify({
+          pending: [
+            {
+              requestId: "req-node-1",
+              deviceId: "device-local",
+              clientId: "node-host",
+              role: "node",
+              ts: 10
+            }
+          ],
+          paired: [
+            {
+              deviceId: "device-local",
+              clientId: "cli",
+              role: "operator"
+            }
+          ]
+        })
+      ],
+      ["devices approve req-node-1 --json", JSON.stringify({ ok: true, requestId: "req-node-1" })]
+    ]);
+    const seen: string[] = [];
+    const runner = new OpenClawDevicePairingCommandRunner({
+      spawnImpl: (_command, args) => {
+        const key = args.join(" ");
+        seen.push(key);
+        return createSpawnResult(outputs.get(key) ?? "")();
+      }
+    });
+
+    const result = await runner.approveLocalNodeUpgrade();
+
+    expect(result?.command).toBe("openclaw devices approve req-node-1 --json");
+    expect(seen).toEqual(["devices list --json", "devices approve req-node-1 --json"]);
   });
 });
