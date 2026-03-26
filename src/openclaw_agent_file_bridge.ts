@@ -103,9 +103,12 @@ export interface OpenClawAgentUsageFacts {
   taskCounts: {
     availability: OpenClawAgentFactAvailability;
     observedTaskCount?: number;
+    todayTaskCount?: number;
   };
-  // OpenClaw does not currently expose a stable local per-agent token ledger in this connector.
-  tokenUsage: OpenClawAgentFactAvailability;
+  tokenUsage: OpenClawAgentFactAvailability & {
+    totalTokens?: number;
+    todayTokens?: number;
+  };
 }
 
 export interface OpenClawAgentFactSnapshot {
@@ -186,8 +189,14 @@ interface ParsedBridgePath {
 
 interface OpenClawSessionIndexSummary {
   totalObservedSessions: number;
+  todayObservedSessions: number;
   cronLikeObservedSessions: number;
   lastCronLikeActivityAt?: string;
+}
+
+interface OpenClawUsageSummary {
+  totalTokens: number;
+  todayTokens: number;
 }
 
 export class OpenClawAgentFileRevisionConflictError extends Error {
@@ -574,6 +583,13 @@ function isCronLikeSessionEntry(entry: Record<string, unknown>): boolean {
   return provider === "cron" || surface === "cron" || originChatType === "cron" || chatType === "cron";
 }
 
+function formatLocalDayKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function parseSessionsIndexSummary(content: string): OpenClawSessionIndexSummary {
   const parsed = JSON.parse(content) as unknown;
   let entries: unknown[] = [];
@@ -584,8 +600,10 @@ function parseSessionsIndexSummary(content: string): OpenClawSessionIndexSummary
   }
 
   let totalObservedSessions = 0;
+  let todayObservedSessions = 0;
   let cronLikeObservedSessions = 0;
   let lastCronLikeActivityMs = 0;
+  const todayKey = formatLocalDayKey(new Date());
 
   for (const entry of entries) {
     const record = asRecord(entry);
@@ -594,12 +612,15 @@ function parseSessionsIndexSummary(content: string): OpenClawSessionIndexSummary
     }
 
     totalObservedSessions += 1;
+    const updatedAtMs = parseTimestampMs(record.updatedAt);
+    if (updatedAtMs && formatLocalDayKey(new Date(updatedAtMs)) == todayKey) {
+      todayObservedSessions += 1;
+    }
     if (!isCronLikeSessionEntry(record)) {
       continue;
     }
 
     cronLikeObservedSessions += 1;
-    const updatedAtMs = parseTimestampMs(record.updatedAt);
     if (updatedAtMs && updatedAtMs > lastCronLikeActivityMs) {
       lastCronLikeActivityMs = updatedAtMs;
     }
@@ -607,6 +628,7 @@ function parseSessionsIndexSummary(content: string): OpenClawSessionIndexSummary
 
   return {
     totalObservedSessions,
+    todayObservedSessions,
     cronLikeObservedSessions,
     ...(lastCronLikeActivityMs > 0 ? { lastCronLikeActivityAt: new Date(lastCronLikeActivityMs).toISOString() } : {})
   };
@@ -920,11 +942,12 @@ export class OpenClawAgentFileBridgeService {
       "shared-skills"
     );
 
-    const sessionsIndexPath = join(this.stateDir, "sessions.json");
+    const sessionsIndexPath = join(this.stateDir, "agents", context.agentId, "sessions", "sessions.json");
     const sessionsIndexCurrent = await this.tryReadCurrent(sessionsIndexPath);
     const sessionsIndexSummary = sessionsIndexCurrent
       ? parseSessionsIndexSummary(sessionsIndexCurrent.content)
       : undefined;
+    const usageSummary = await this.collectUsageSummary(context.agentId);
 
     const memoryEntryBridgePaths = memoryFiles
       .filter((file) => file.bridgePath.startsWith("workspace/memory/"))
@@ -993,17 +1016,82 @@ export class OpenClawAgentFileBridgeService {
               ? "已从 OpenClaw sessions 索引统计任务数。"
               : "未发现可统计的本地任务索引。"
           },
-          ...(sessionsIndexSummary ? { observedTaskCount: sessionsIndexSummary.totalObservedSessions } : {})
+          ...(sessionsIndexSummary
+            ? {
+                observedTaskCount: sessionsIndexSummary.totalObservedSessions,
+                todayTaskCount: sessionsIndexSummary.todayObservedSessions
+              }
+            : {})
         },
         tokenUsage: {
-          available: configFiles.some((file) => file.exists),
-          source: configFiles.some((file) => file.exists) ? "openclaw-filesystem" : "unavailable",
-          detail: configFiles.some((file) => file.exists)
-            ? "已发现可供补充 usage/token 统计的本地配置文件。"
-            : "本地尚未暴露稳定的 per-agent token ledger。"
+          available: usageSummary.totalTokens > 0 || usageSummary.todayTokens > 0,
+          source:
+            usageSummary.totalTokens > 0 || usageSummary.todayTokens > 0
+              ? "openclaw-sessions-index"
+              : "unavailable",
+          detail:
+            usageSummary.totalTokens > 0 || usageSummary.todayTokens > 0
+              ? "已从 OpenClaw agent sessions transcript 聚合 token usage。"
+              : "未发现可统计的本地 token transcript。",
+          ...(usageSummary.totalTokens > 0 ? { totalTokens: usageSummary.totalTokens } : {}),
+          ...(usageSummary.todayTokens > 0 ? { todayTokens: usageSummary.todayTokens } : {})
         }
       }
     };
+  }
+
+  private async collectUsageSummary(agentId: string): Promise<OpenClawUsageSummary> {
+    const sessionsDir = join(this.stateDir, 'agents', agentId, 'sessions');
+    const entries = await readdir(sessionsDir, { withFileTypes: true }).catch(() => [] as Dirent[]);
+    const todayKey = formatLocalDayKey(new Date());
+    let totalTokens = 0;
+    let todayTokens = 0;
+
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
+        continue;
+      }
+      const filePath = join(sessionsDir, entry.name);
+      let content = '';
+      try {
+        content = await readFile(filePath, 'utf-8');
+      } catch {
+        continue;
+      }
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        const record = asRecord(parsed);
+        const message = asRecord(record?.message);
+        const usage = asRecord(message?.usage ?? record?.usage);
+        if (!usage) {
+          continue;
+        }
+        const input = Number(usage.input ?? 0) || 0;
+        const output = Number(usage.output ?? 0) || 0;
+        const cacheRead = Number(usage.cacheRead ?? usage.cache_read ?? 0) || 0;
+        const cacheWrite = Number(usage.cacheWrite ?? usage.cache_write ?? 0) || 0;
+        const total = Number(usage.total ?? input + output + cacheRead + cacheWrite) || 0;
+        if (total <= 0) {
+          continue;
+        }
+        totalTokens += total;
+        const ts = parseTimestampMs(record?.timestamp ?? message?.timestamp);
+        if (ts && formatLocalDayKey(new Date(ts)) === todayKey) {
+          todayTokens += total;
+        }
+      }
+    }
+
+    return { totalTokens, todayTokens };
   }
 
   private async resolveAgentContext(agentId?: string): Promise<ResolvedAgentContext> {
