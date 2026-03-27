@@ -12,4 +12,5 @@ export * from "./pairing_client.js";
 export * from "./runtime_config.js";
 export * from "./runtime_status_tracker.js";
 export * from "./runtime_worker.js";
+export * from "./service_manager.js";
 //# sourceMappingURL=index.js.map

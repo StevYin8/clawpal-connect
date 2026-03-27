@@ -173,12 +173,42 @@ function executionOutput(result: GatewayCommandExecution): string {
   return `${result.stdout}\n${result.stderr}`.trim();
 }
 
+const AMBIGUOUS_RUNTIME_MARKERS = [
+  "runtime pid does not own the listening port",
+  "other gateway process(es) are listening",
+  "multiple gateways",
+  "service: launchagent (not loaded)",
+  "service not installed",
+  "service unit not found",
+  "service config looks out of date or non-standard",
+  "probe: ok",
+  "cleanup hint:"
+] as const;
+
+export function describeAmbiguousRuntimeExecution(result: GatewayCommandExecution | undefined): string | undefined {
+  if (!result) {
+    return undefined;
+  }
+  const output = executionOutput(result).toLowerCase();
+  const marker = AMBIGUOUS_RUNTIME_MARKERS.find((value) => output.includes(value));
+  if (!marker) {
+    return undefined;
+  }
+  return (
+    `Ambiguous OpenClaw runtime state detected while inspecting \`${result.command}\`: ${marker}. ` +
+    "Automatic recovery is blocked until the local managed service ownership is made unambiguous."
+  );
+}
+
 function isRuntimeInstalled(result: GatewayCommandExecution): boolean {
   const output = executionOutput(result).toLowerCase();
   return !output.includes("service unit not found") && !output.includes("service not installed");
 }
 
 function isRuntimeActive(result: GatewayCommandExecution, target: OpenClawRuntimeTarget): boolean {
+  if (describeAmbiguousRuntimeExecution(result)) {
+    return false;
+  }
   const output = executionOutput(result).toLowerCase();
   const commandHint = target === "node" ? " node run" : " gateway --port";
   const hasMatchingCommand = output.includes(commandHint);
@@ -223,16 +253,25 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
 
   async start(): Promise<GatewayCommandExecution> {
     const inspection = await this.inspectRuntimeTarget();
+    if (inspection.ambiguousReason) {
+      return this.buildBlockedExecution(inspection.preferredTarget, "start", inspection.ambiguousReason, inspection.preferredStatus);
+    }
     return await this.runForTarget(inspection.preferredTarget, "start");
   }
 
   async stop(): Promise<GatewayCommandExecution> {
     const inspection = await this.inspectRuntimeTarget();
+    if (inspection.ambiguousReason) {
+      return this.buildBlockedExecution(inspection.preferredTarget, "stop", inspection.ambiguousReason, inspection.preferredStatus);
+    }
     return await this.runForTarget(inspection.preferredTarget, "stop");
   }
 
   async restart(): Promise<GatewayCommandExecution> {
     const inspection = await this.inspectRuntimeTarget();
+    if (inspection.ambiguousReason) {
+      return this.buildBlockedExecution(inspection.preferredTarget, "restart", inspection.ambiguousReason, inspection.preferredStatus);
+    }
     return await this.runForTarget(inspection.preferredTarget, "restart");
   }
 
@@ -240,6 +279,7 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
     preferredTarget: OpenClawRuntimeTarget;
     preferredStatus: GatewayCommandExecution;
     activeStatus?: GatewayCommandExecution;
+    ambiguousReason?: string;
   }> {
     const [gatewayStatus, nodeStatus] = await Promise.all([
       this.runForTarget("gateway", "status"),
@@ -248,28 +288,17 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
 
     const gatewayActive = isRuntimeActive(gatewayStatus, "gateway");
     const nodeActive = isRuntimeActive(nodeStatus, "node");
-    if (nodeActive && !gatewayActive) {
+    const gatewayAmbiguous = describeAmbiguousRuntimeExecution(gatewayStatus);
+    const nodeAmbiguous = describeAmbiguousRuntimeExecution(nodeStatus);
+
+    if (nodeActive && !gatewayActive && !nodeAmbiguous) {
       return {
         preferredTarget: "node",
         preferredStatus: nodeStatus,
         activeStatus: nodeStatus
       };
     }
-    if (gatewayActive && !nodeActive) {
-      return {
-        preferredTarget: "gateway",
-        preferredStatus: gatewayStatus,
-        activeStatus: gatewayStatus
-      };
-    }
-    if (nodeActive) {
-      return {
-        preferredTarget: "node",
-        preferredStatus: nodeStatus,
-        activeStatus: nodeStatus
-      };
-    }
-    if (gatewayActive) {
+    if (gatewayActive && !nodeActive && !gatewayAmbiguous) {
       return {
         preferredTarget: "gateway",
         preferredStatus: gatewayStatus,
@@ -279,22 +308,53 @@ export class OpenClawGatewayCommandRunner implements GatewayCommandRunner {
 
     const nodeInstalled = isRuntimeInstalled(nodeStatus);
     const gatewayInstalled = isRuntimeInstalled(gatewayStatus);
-    if (nodeInstalled && !gatewayInstalled) {
+    const preferredTarget: OpenClawRuntimeTarget = nodeInstalled && !gatewayInstalled ? "node" : "gateway";
+    const preferredStatus = preferredTarget === "node" ? nodeStatus : gatewayStatus;
+    const reasons = [nodeAmbiguous, gatewayAmbiguous].filter((value): value is string => Boolean(value));
+
+    if (nodeActive && gatewayActive) {
+      reasons.unshift("Both OpenClaw node and gateway runtimes appear active at the same time.");
+    }
+    if (reasons.length > 0) {
       return {
-        preferredTarget: "node",
-        preferredStatus: nodeStatus
+        preferredTarget,
+        preferredStatus,
+        ambiguousReason: reasons.join(" ")
       };
     }
-    if (gatewayInstalled && !nodeInstalled) {
+
+    if (!nodeInstalled && !gatewayInstalled) {
       return {
-        preferredTarget: "gateway",
-        preferredStatus: gatewayStatus
+        preferredTarget: "node",
+        preferredStatus: nodeStatus,
+        ambiguousReason: "No managed OpenClaw runtime service is installed. Automatic recovery is blocked."
       };
     }
 
     return {
-      preferredTarget: "node",
-      preferredStatus: nodeStatus
+      preferredTarget,
+      preferredStatus,
+      ambiguousReason: "No clearly active managed OpenClaw runtime service is loaded. Automatic recovery is blocked."
+    };
+  }
+
+  private buildBlockedExecution(
+    target: OpenClawRuntimeTarget,
+    command: GatewayLifecycleCommand,
+    detail: string,
+    status: GatewayCommandExecution
+  ): GatewayCommandExecution {
+    return {
+      command: `${this.openClawBinary} ${target} ${command}`,
+      args: [target, command],
+      stdout: status.stdout,
+      stderr: [detail, status.stderr.trim()].filter(Boolean).join("\n"),
+      exitCode: 1,
+      signal: null,
+      startedAt: status.startedAt,
+      completedAt: new Date().toISOString(),
+      durationMs: 0,
+      runtimeTarget: target
     };
   }
 
@@ -604,6 +664,7 @@ export class GatewayWatchdog implements GatewayWatchdogLifecycle {
     let verifiedProbe: GatewayProbeResult | undefined;
     let ok = false;
     let detail = "";
+    let forceManualAttention = false;
 
     try {
       preflightStatus = await this.commandRunner.status();
@@ -611,27 +672,37 @@ export class GatewayWatchdog implements GatewayWatchdogLifecycle {
       preflightStatusError = toErrorMessage(error);
     }
 
-    try {
-      restart = await this.commandRunner.restart();
-    } catch (error) {
-      restartError = toErrorMessage(error);
-    }
-
-    if (restartError) {
-      detail = `${restartError}`;
-    } else if (!restart) {
-      detail = "Runtime restart did not return an execution result.";
-    } else if (restart.exitCode !== 0) {
-      const signalInfo = restart.signal ? `, signal=${restart.signal}` : "";
-      const stderr = restart.stderr.trim();
-      detail = `${restart.command} exited with code ${String(restart.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
+    const ambiguousPreflight = describeAmbiguousRuntimeExecution(preflightStatus);
+    if (ambiguousPreflight) {
+      detail = ambiguousPreflight;
+      forceManualAttention = true;
     } else {
-      verifiedProbe = await this.gatewayDetector.detect();
-      this.lastProbe = cloneGatewayProbeResult(verifiedProbe);
-      ok = verifiedProbe.ok;
-      detail = ok
-        ? `Gateway recovered after ${restart.command}.`
-        : `${restart.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+      try {
+        restart = await this.commandRunner.restart();
+      } catch (error) {
+        restartError = toErrorMessage(error);
+      }
+
+      const ambiguousRestart = describeAmbiguousRuntimeExecution(restart);
+      if (ambiguousRestart) {
+        detail = ambiguousRestart;
+        forceManualAttention = true;
+      } else if (restartError) {
+        detail = `${restartError}`;
+      } else if (!restart) {
+        detail = "Runtime restart did not return an execution result.";
+      } else if (restart.exitCode !== 0) {
+        const signalInfo = restart.signal ? `, signal=${restart.signal}` : "";
+        const stderr = restart.stderr.trim();
+        detail = `${restart.command} exited with code ${String(restart.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
+      } else {
+        verifiedProbe = await this.gatewayDetector.detect();
+        this.lastProbe = cloneGatewayProbeResult(verifiedProbe);
+        ok = verifiedProbe.ok;
+        detail = ok
+          ? `Gateway recovered after ${restart.command}.`
+          : `${restart.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+      }
     }
 
     const completedAt = this.now().toISOString();
@@ -663,6 +734,12 @@ export class GatewayWatchdog implements GatewayWatchdogLifecycle {
 
     this.consecutiveRecoveryFailures += 1;
     this.lastRecoveryFailureAt = completedAt;
+
+    if (forceManualAttention) {
+      this.nextRecoveryAllowedAtMs = null;
+      this.phase = "manual_attention";
+      return;
+    }
 
     if (this.consecutiveRecoveryFailures >= this.maxRecoveryAttempts) {
       this.nextRecoveryAllowedAtMs = null;
