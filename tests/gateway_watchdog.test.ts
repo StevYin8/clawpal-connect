@@ -250,6 +250,65 @@ describe("GatewayWatchdog", () => {
     expect(seen).toEqual(["gateway status", "node status", "node restart"]);
   });
 
+  test("blocks automatic restart when runtime ownership is ambiguous", async () => {
+    const outputs = new Map<string, string>([
+      [
+        "gateway status",
+        "Service: LaunchAgent (loaded)\nRuntime: running (pid 456, state active)\nGateway runtime PID does not own the listening port. Other gateway process(es) are listening: 123\n"
+      ],
+      ["node status", "Service: LaunchAgent (not loaded)\nService not installed. Run: openclaw node install\n"],
+      ["gateway restart", "should-not-run\n"]
+    ]);
+    const seen: string[] = [];
+    const runner = new OpenClawGatewayCommandRunner({
+      spawnImpl: (_command, args) => {
+        const key = `${args[0]} ${args[1]}`;
+        seen.push(key);
+        return createSpawnResult(outputs.get(key) ?? "")();
+      }
+    });
+
+    const result = await runner.restart();
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Ambiguous OpenClaw runtime state detected");
+    expect(seen).toEqual(["gateway status", "node status"]);
+  });
+
+  test("enters manual attention without restart on ambiguous runtime ownership", async () => {
+    const offline = createProbe({ ok: false, status: "offline", detail: "offline" });
+    const gatewayDetector = createSequentialDetector([offline], offline);
+    const commandRunner = new RecordingCommandRunner({
+      statusResults: [
+        createCommandExecution("status", {
+          stdout:
+            "Service: LaunchAgent (loaded)\nRuntime: running (pid 456, state active)\n" +
+            "Gateway runtime PID does not own the listening port. Other gateway process(es) are listening: 123\n"
+        })
+      ]
+    });
+    const watchdog = new GatewayWatchdog({
+      gatewayDetector,
+      commandRunner,
+      pollIntervalMs: 5,
+      consecutiveFailureThreshold: 1,
+      restartCooldownMs: 0,
+      backoffScheduleMs: [0]
+    });
+
+    const stop = watchdog.start();
+    try {
+      await waitForCondition(() => watchdog.getSnapshot().phase === "manual_attention");
+    } finally {
+      stop();
+    }
+
+    const snapshot = watchdog.getSnapshot();
+    expect(commandRunner.statusCalls).toBe(1);
+    expect(commandRunner.restartCalls).toBe(0);
+    expect(snapshot.recentRecoveries[0]?.detail).toContain("Ambiguous OpenClaw runtime state detected");
+  });
+
   test("approves matching local node-host upgrade when pairing is pending", async () => {
     const outputs = new Map<string, string>([
       [

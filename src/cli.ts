@@ -21,6 +21,7 @@ import {
   type RuntimeConfigUpdate
 } from "./runtime_config.js";
 import { RuntimeWorker } from "./runtime_worker.js";
+import { ConnectorServiceManager, type ConnectorServiceLifecycleCommand } from "./service_manager.js";
 import { WsBackendTransport } from "./ws_backend_transport.js";
 import { startLocalWebUi, type ConnectorDiagnosticsSnapshot } from "./web/local_web_ui.js";
 
@@ -87,6 +88,8 @@ interface RunCliOptions extends RegistryCliOptions, RuntimeConfigCliOptions {
   webPort: number;
   durationMs?: number;
 }
+
+interface ServiceCliOptions extends RegistryCliOptions, RuntimeConfigCliOptions {}
 
 interface WsLifecycleOptions extends GatewayCliOptions {
   backendUrl: string;
@@ -185,6 +188,10 @@ function withRunOptions(command: Command): Command {
     .option("--duration-ms <ms>", "Auto-stop after N milliseconds", parsePositiveInt);
 }
 
+function withServiceOptions(command: Command): Command {
+  return withRuntimeConfigOption(withRegistryOption(command));
+}
+
 function normalizePath(path: string): string | undefined {
   const value = path.trim();
   return value || undefined;
@@ -225,6 +232,15 @@ function buildHostRegistry(options: RegistryCliOptions): HostRegistry {
 function buildRuntimeConfigStore(options: RuntimeConfigCliOptions): RuntimeConfigStore {
   const runtimeConfigFile = normalizePath(options.runtimeConfigFile);
   return new RuntimeConfigStore(runtimeConfigFile ? { filePath: runtimeConfigFile } : {});
+}
+
+function buildConnectorServiceManager(options: ServiceCliOptions): ConnectorServiceManager {
+  const registryFile = normalizePath(options.registryFile);
+  const runtimeConfigFile = normalizePath(options.runtimeConfigFile);
+  return new ConnectorServiceManager({
+    ...(registryFile ? { registryFile } : {}),
+    ...(runtimeConfigFile ? { runtimeConfigFile } : {})
+  });
 }
 
 async function resolveLocalGatewayDefaults(): Promise<{
@@ -566,7 +582,12 @@ async function runLifecycleLoop(options: {
     console.log(`diagnostics web ui=${web.url}`);
   }
 
-  console.log("Press Ctrl+C to stop.");
+  if (process.env.CLAWPAL_CONNECTOR_SERVICE === "1") {
+    console.log("service mode=launchd managed");
+  } else {
+    console.log("Press Ctrl+C to stop.");
+    console.log("hint=For stable background usage on macOS: clawpal service install && clawpal service start");
+  }
 
   try {
     await waitForShutdown(options.durationMs);
@@ -668,6 +689,31 @@ async function persistPairingResolution(options: {
   };
 }
 
+async function runServiceCommand(
+  action: ConnectorServiceLifecycleCommand,
+  options: ServiceCliOptions
+): Promise<void> {
+  const manager = buildConnectorServiceManager(options);
+  const result = await manager[action]();
+  if (result.stdout.trim()) {
+    console.log(result.stdout.trim());
+  }
+  if (result.stderr.trim()) {
+    console.error(result.stderr.trim());
+  }
+  if (action === "install") {
+    console.log(`label=${result.label}`);
+    console.log(`service=${result.servicePath}`);
+    console.log(`platform=${result.platform}`);
+  }
+  if (action === "start") {
+    console.log("hint=Connector is now managed by the OS service manager; terminal can close.");
+  }
+  if (result.exitCode && result.exitCode !== 0) {
+    process.exitCode = result.exitCode;
+  }
+}
+
 async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
   const transport = new MockBackendTransport();
   const runtime = new ConnectorRuntime({
@@ -717,6 +763,7 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
   console.log(`registry file=${registry.getStoreFilePath()}`);
   console.log(`runtime config=${runtimeConfigStore.getStoreFilePath()}`);
   console.log(`run defaults=transport=${runtimeConfig.transport}, gateway=${runtimeConfig.gatewayUrl}`);
+  console.log("hint=For stable background usage on macOS, run: clawpal service install && clawpal service start");
   console.log("");
 
   await runRunCommand({
@@ -909,6 +956,38 @@ withRunOptions(
 ).action(
   async (options: RunCliOptions) => {
     await runRunCommand(options);
+  }
+);
+
+const serviceCommand = program.command("service").description("Manage the connector background service (launchd/systemd/schtasks)");
+withServiceOptions(serviceCommand.command("install").description("Install connector LaunchAgent plist")).action(
+  async (options: ServiceCliOptions) => {
+    await runServiceCommand("install", options);
+  }
+);
+withServiceOptions(serviceCommand.command("start").description("Start connector LaunchAgent")).action(
+  async (options: ServiceCliOptions) => {
+    await runServiceCommand("start", options);
+  }
+);
+withServiceOptions(serviceCommand.command("stop").description("Stop connector LaunchAgent")).action(
+  async (options: ServiceCliOptions) => {
+    await runServiceCommand("stop", options);
+  }
+);
+withServiceOptions(serviceCommand.command("restart").description("Restart connector LaunchAgent")).action(
+  async (options: ServiceCliOptions) => {
+    await runServiceCommand("restart", options);
+  }
+);
+withServiceOptions(serviceCommand.command("status").description("Print connector LaunchAgent status")).action(
+  async (options: ServiceCliOptions) => {
+    await runServiceCommand("status", options);
+  }
+);
+withServiceOptions(serviceCommand.command("uninstall").description("Remove connector LaunchAgent plist")).action(
+  async (options: ServiceCliOptions) => {
+    await runServiceCommand("uninstall", options);
   }
 );
 

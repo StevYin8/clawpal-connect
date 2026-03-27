@@ -1,13 +1,14 @@
 import WebSocket from "ws";
 import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, TransportRecoverySnapshot } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
-import { type GatewayCommandRunner } from "./gateway_watchdog.js";
+import { type GatewayCommandRunner, type PairingCommandRunner } from "./gateway_watchdog.js";
 interface GatewayProbeDetector {
     detect(): Promise<GatewayProbeResult>;
 }
 export interface WsBackendTransportOptions {
     gatewayDetector?: GatewayProbeDetector;
     gatewayCommandRunner?: GatewayCommandRunner;
+    pairingCommandRunner?: PairingCommandRunner;
     connectTimeoutMs?: number;
     reconnectDelayMs?: number;
     maxReconnectDelayMs?: number;
@@ -27,6 +28,7 @@ export declare class WsBackendTransport implements BackendTransport {
     readonly name = "ws";
     private readonly gatewayDetector;
     private readonly gatewayCommandRunner;
+    private readonly pairingCommandRunner;
     private readonly connectTimeoutMs;
     private readonly reconnectDelayMs;
     private readonly maxReconnectDelayMs;

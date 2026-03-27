@@ -130,9 +130,9 @@ export type ConnectorEvent = HostStatusEvent | MessageStartEvent | MessageDeltaE
 export type ConnectorEventInput = Omit<HostStatusEvent, "at"> | Omit<MessageStartEvent, "at"> | Omit<MessageDeltaEvent, "at"> | Omit<MessageDoneEvent, "at"> | Omit<MessageErrorEvent, "at"> | Omit<AgentRuntimeStatusEvent, "at"> | Omit<AgentFilesResponseOkEvent, "at"> | Omit<AgentFilesResponseErrEvent, "at">;
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
-export type TransportRecoveryPhase = "unsupported" | "idle" | "reconnecting" | "diagnosing" | "recovering_gateway" | "relay_unreachable" | "manual_attention";
-export type TransportRecoveryStatus = "unsupported" | "healthy" | "degraded" | "recovering" | "relay_unreachable" | "manual_attention";
-export type TransportRecoveryAttemptClassification = "relay_unreachable" | "gateway_unhealthy_recovered" | "gateway_unhealthy_unresolved" | "diagnostic_error";
+export type TransportRecoveryPhase = "unsupported" | "idle" | "reconnecting" | "diagnosing" | "recovering_gateway" | "waiting_for_pairing" | "relay_unreachable" | "manual_attention";
+export type TransportRecoveryStatus = "unsupported" | "healthy" | "degraded" | "recovering" | "pairing_required" | "relay_unreachable" | "manual_attention";
+export type TransportRecoveryAttemptClassification = "relay_unreachable" | "gateway_unhealthy_recovered" | "gateway_unhealthy_unresolved" | "pairing_required_approved" | "pairing_required_unresolved" | "diagnostic_error";
 export interface TransportRecoveryGatewayProbe {
     status: "online" | "unauthorized" | "offline" | "error";
     ok: boolean;
@@ -158,6 +158,12 @@ export interface TransportRecoveryAttemptRecord {
     restartStdout?: string;
     restartStderr?: string;
     restartError?: string;
+    approvalCommand?: string;
+    approvalExitCode?: number | null;
+    approvalSignal?: NodeJS.Signals | null;
+    approvalStdout?: string;
+    approvalStderr?: string;
+    approvalError?: string;
 }
 export interface TransportRecoverySnapshot {
     supported: boolean;
