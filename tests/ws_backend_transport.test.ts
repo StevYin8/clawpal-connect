@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { ForwardedFileRequest } from "../src/backend_client.js";
-import type { PairingCommandRunner } from "../src/gateway_watchdog.js";
+import type { GatewayCommandRunner, PairingCommandRunner } from "../src/gateway_watchdog.js";
 import { WsBackendTransport, resolveRelayWsBaseUrl } from "../src/ws_backend_transport.js";
 
 describe("resolveRelayWsBaseUrl", () => {
@@ -71,6 +71,75 @@ describe("resolveRelayWsBaseUrl", () => {
     });
 
     expect(callCount).toBe(0);
+  });
+
+  test("moves to manual attention when gateway ownership is ambiguous", async () => {
+    let restartCalls = 0;
+    const gatewayCommandRunner: GatewayCommandRunner = {
+      async status() {
+        return {
+          command: "openclaw gateway status",
+          args: ["gateway", "status"],
+          stdout:
+            "Service: LaunchAgent (loaded)\nRuntime: running (pid 456, state active)\n" +
+            "Gateway runtime PID does not own the listening port. Other gateway process(es) are listening: 123\n",
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+          startedAt: "2026-03-26T01:00:00.000Z",
+          completedAt: "2026-03-26T01:00:01.000Z",
+          durationMs: 1000,
+          runtimeTarget: "gateway"
+        };
+      },
+      async start() {
+        throw new Error("not used");
+      },
+      async stop() {
+        throw new Error("not used");
+      },
+      async restart() {
+        restartCalls += 1;
+        return {
+          command: "openclaw gateway restart",
+          args: ["gateway", "restart"],
+          stdout: "unexpected",
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+          startedAt: "2026-03-26T01:00:00.000Z",
+          completedAt: "2026-03-26T01:00:01.000Z",
+          durationMs: 1000,
+          runtimeTarget: "gateway"
+        };
+      }
+    };
+    const transport = new WsBackendTransport({
+      gatewayDetector: {
+        async detect() {
+          return {
+            status: "offline",
+            ok: false,
+            detail: "offline",
+            checkedAt: "2026-03-26T01:00:00.000Z",
+            endpoint: "http://127.0.0.1:18789/tools/invoke",
+            latencyMs: 5
+          };
+        }
+      },
+      gatewayCommandRunner
+    });
+
+    await (transport as unknown as {
+      runRecoveryDiagnosis: (lastConnectError: string) => Promise<void>;
+    }).runRecoveryDiagnosis("socket hang up");
+
+    const snapshot = transport.getRecoverySnapshot();
+    expect(restartCalls).toBe(0);
+    expect(snapshot.phase).toBe("manual_attention");
+    expect(snapshot.status).toBe("manual_attention");
+    expect(snapshot.recentRecoveryAttempts[0]?.classification).toBe("gateway_unhealthy_unresolved");
+    expect(snapshot.recentRecoveryAttempts[0]?.detail).toContain("Ambiguous OpenClaw runtime state detected");
   });
 
   test("auto-approves local node-host pairing upgrade before further recovery", async () => {

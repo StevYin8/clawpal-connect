@@ -20,6 +20,7 @@ import type { GatewayProbeResult } from "./gateway_detector.js";
 import {
   OpenClawDevicePairingCommandRunner,
   OpenClawGatewayCommandRunner,
+  describeAmbiguousRuntimeExecution,
   type GatewayCommandExecution,
   type GatewayCommandRunner,
   type PairingCommandRunner
@@ -539,43 +540,63 @@ export class WsBackendTransport implements BackendTransport {
           this.recoveryDetail =
             `Gateway probe unhealthy (${probe.detail}). Attempting local OpenClaw runtime recovery.`;
 
+          let forceManualAttention = false;
           if (!this.gatewayCommandRunner) {
             classification = "gateway_unhealthy_unresolved";
             detail =
               `Gateway probe unhealthy (${probe.detail}) but no restart command runner is configured. ` +
               "Cannot attempt local gateway recovery.";
           } else {
+            let preflightStatus: GatewayCommandExecution | undefined;
             try {
-              restartExecution = await this.gatewayCommandRunner.restart();
+              preflightStatus = await this.gatewayCommandRunner.status();
             } catch (error) {
               restartError = toErrorMessage(error);
             }
 
-            if (restartError) {
+            const ambiguousPreflight = describeAmbiguousRuntimeExecution(preflightStatus);
+            if (ambiguousPreflight) {
               classification = "gateway_unhealthy_unresolved";
-              detail = restartError;
-            } else if (!restartExecution) {
-              classification = "gateway_unhealthy_unresolved";
-              detail = "Runtime restart did not return an execution result.";
-            } else if (restartExecution.exitCode !== 0) {
-              classification = "gateway_unhealthy_unresolved";
-              const signalInfo = restartExecution.signal ? `, signal=${restartExecution.signal}` : "";
-              const stderr = restartExecution.stderr.trim();
-              detail =
-                `${restartExecution.command} exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
-                `${stderr ? `, stderr=${stderr}` : ""}`;
+              detail = ambiguousPreflight;
+              forceManualAttention = true;
             } else {
-              const verifiedProbe = await this.gatewayDetector.detect();
-              gatewayProbe = this.toRecoveryGatewayProbe(verifiedProbe);
-              this.lastGatewayProbe = cloneGatewayProbe(gatewayProbe);
-              if (verifiedProbe.ok) {
-                classification = "gateway_unhealthy_recovered";
-                ok = true;
-                detail = `Gateway recovered after ${restartExecution.command}. Continuing websocket reconnect.`;
-              } else {
+              try {
+                restartExecution = await this.gatewayCommandRunner.restart();
+              } catch (error) {
+                restartError = toErrorMessage(error);
+              }
+
+              const ambiguousRestart = describeAmbiguousRuntimeExecution(restartExecution);
+              if (ambiguousRestart) {
                 classification = "gateway_unhealthy_unresolved";
+                detail = ambiguousRestart;
+                forceManualAttention = true;
+              } else if (restartError) {
+                classification = "gateway_unhealthy_unresolved";
+                detail = restartError;
+              } else if (!restartExecution) {
+                classification = "gateway_unhealthy_unresolved";
+                detail = "Runtime restart did not return an execution result.";
+              } else if (restartExecution.exitCode !== 0) {
+                classification = "gateway_unhealthy_unresolved";
+                const signalInfo = restartExecution.signal ? `, signal=${restartExecution.signal}` : "";
+                const stderr = restartExecution.stderr.trim();
                 detail =
-                  `${restartExecution.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+                  `${restartExecution.command} exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
+                  `${stderr ? `, stderr=${stderr}` : ""}`;
+              } else {
+                const verifiedProbe = await this.gatewayDetector.detect();
+                gatewayProbe = this.toRecoveryGatewayProbe(verifiedProbe);
+                this.lastGatewayProbe = cloneGatewayProbe(gatewayProbe);
+                if (verifiedProbe.ok) {
+                  classification = "gateway_unhealthy_recovered";
+                  ok = true;
+                  detail = `Gateway recovered after ${restartExecution.command}. Continuing websocket reconnect.`;
+                } else {
+                  classification = "gateway_unhealthy_unresolved";
+                  detail =
+                    `${restartExecution.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+                }
               }
             }
           }
@@ -589,12 +610,12 @@ export class WsBackendTransport implements BackendTransport {
           } else {
             this.consecutiveGatewayRecoveryFailures += 1;
             this.lastRecoveryFailureAt = this.now().toISOString();
-            if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
+            if (forceManualAttention || this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
               this.recoveryPhase = "manual_attention";
               this.recoveryStatus = "manual_attention";
-              this.recoveryDetail =
-                `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
-                `${this.maxGatewayRecoveryAttempts} failed local gateway recoveries.`;
+              this.recoveryDetail = forceManualAttention
+                ? detail
+                : `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/${this.maxGatewayRecoveryAttempts} failed local gateway recoveries.`;
             } else {
               this.recoveryPhase = "reconnecting";
               this.recoveryStatus = "degraded";

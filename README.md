@@ -17,7 +17,17 @@ clawpal pair
 
 3. 终端会显示一个 **6 位 pairing code**。
 4. 在 ClawPal App 里输入该 pairing code 完成绑定。
-5. 绑定完成后，当前 `pair` 进程会自动继续启动 connector 运行时（不需要重新执行命令）。
+5. 绑定完成后，如果你只是临时验证，可以让当前前台进程继续跑；如果你要长期稳定运行，**推荐立刻切到后台服务模式**：
+
+```bash
+clawpal service install
+clawpal service start
+```
+
+6. 启动后台服务后，终端可以直接关闭。
+   - macOS：LaunchAgent
+   - Linux：systemd --user
+   - Windows：Scheduled Task
 
 ## 首次绑定示例
 
@@ -42,6 +52,13 @@ clawpal run
 
 会直接按原有流程启动，不会再次进入 pairing。
 
+但 **`clawpal run` 仍然是前台运行模式**。要让 connector 脱离终端长期稳定运行，请使用：
+
+```bash
+clawpal service install
+clawpal service start
+```
+
 ## 命令
 
 ### `clawpal pair`
@@ -56,6 +73,8 @@ clawpal pair
 - 等待 App 完成绑定
 - 写入本地绑定和运行配置
 - **绑定成功后自动继续执行 `clawpal run` 的运行流程**
+- 长期稳定运行时，建议随后执行 `clawpal service install && clawpal service start`
+- 该命令会接入当前平台的后台服务管理：macOS LaunchAgent / Linux systemd --user / Windows Scheduled Task
 
 常用参数：
 - `--backend-url <url>`：relay backend 地址（默认使用发行版内置值，或由 `CLAWPAL_BACKEND_URL` 提供）
@@ -73,6 +92,8 @@ clawpal run
 
 作用：
 - 使用本地已保存的绑定配置，直接启动 connector
+- 这是**前台模式**，适合调试/临时运行
+- 要让 connector 脱离终端常驻，请改用 `clawpal service start`
 
 如果还没有绑定，会明确提示你先执行：
 
@@ -95,6 +116,43 @@ clawpal status
 ```
 
 查看 gateway 检测状态、本地绑定状态。
+
+### `clawpal service <install|start|stop|restart|status|uninstall>`
+
+```bash
+clawpal service install
+clawpal service start
+clawpal service status
+```
+
+作用：
+- 把 connector 安装为当前平台的后台服务
+  - macOS：每用户 LaunchAgent
+  - Linux：`systemd --user`
+  - Windows：Scheduled Task
+- 让 connector 在后台常驻运行，不依赖终端窗口
+- 日志写入 `~/.clawpal-connect/logs/`
+
+推荐顺序：
+
+```bash
+clawpal pair
+clawpal service install
+clawpal service start
+```
+
+常见用法：
+
+```bash
+# 查看后台服务状态
+clawpal service status
+
+# 重启后台服务
+clawpal service restart
+
+# 停止后台服务
+clawpal service stop
+```
 
 ## 本地持久化文件
 

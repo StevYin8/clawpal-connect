@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { OpenClawGatewayCommandRunner } from "./gateway_watchdog.js";
+import { OpenClawDevicePairingCommandRunner, OpenClawGatewayCommandRunner, describeAmbiguousRuntimeExecution } from "./gateway_watchdog.js";
 const AGENT_FILES_OPERATIONS = [
     "agents.files.list",
     "agents.files.get",
@@ -28,6 +28,10 @@ function normalizeNonNegativeInt(value, fallback) {
 }
 function toErrorMessage(error) {
     return error instanceof Error ? error.message : String(error);
+}
+function isPairingRequiredError(detail) {
+    const normalized = detail.toLowerCase();
+    return normalized.includes("pairing required") || normalized.includes("role-upgrade") || normalized.includes("not paired");
 }
 function cloneGatewayProbe(probe) {
     return { ...probe };
@@ -82,6 +86,7 @@ export class WsBackendTransport {
     name = "ws";
     gatewayDetector;
     gatewayCommandRunner;
+    pairingCommandRunner;
     connectTimeoutMs;
     reconnectDelayMs;
     maxReconnectDelayMs;
@@ -125,6 +130,7 @@ export class WsBackendTransport {
         this.gatewayDetector = options.gatewayDetector;
         this.gatewayCommandRunner =
             options.gatewayCommandRunner ?? (this.gatewayDetector ? new OpenClawGatewayCommandRunner() : undefined);
+        this.pairingCommandRunner = options.pairingCommandRunner ?? new OpenClawDevicePairingCommandRunner();
         this.connectTimeoutMs = normalizePositiveInt(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS);
         this.reconnectDelayMs = normalizePositiveInt(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
         this.maxReconnectDelayMs = normalizePositiveInt(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS);
@@ -352,11 +358,75 @@ export class WsBackendTransport {
         let gatewayProbe;
         let restartExecution;
         let restartError;
+        let approvalExecution;
+        let approvalError;
         let classification = "diagnostic_error";
         let ok = false;
         let detail = "";
         try {
-            if (!this.gatewayDetector) {
+            if (isPairingRequiredError(lastConnectError)) {
+                this.recoveryPhase = "waiting_for_pairing";
+                this.recoveryStatus = "pairing_required";
+                this.recoveryDetail =
+                    `Detected pairing/role-upgrade requirement from transport error: ${lastConnectError}. ` +
+                        "Attempting local node-host approval.";
+                if (!this.pairingCommandRunner) {
+                    classification = "pairing_required_unresolved";
+                    detail = "Pairing approval runner is not configured.";
+                }
+                else {
+                    try {
+                        approvalExecution = await this.pairingCommandRunner.approveLocalNodeUpgrade();
+                    }
+                    catch (error) {
+                        approvalError = toErrorMessage(error);
+                    }
+                    if (approvalError) {
+                        classification = "pairing_required_unresolved";
+                        detail = approvalError;
+                    }
+                    else if (!approvalExecution) {
+                        classification = "pairing_required_unresolved";
+                        detail =
+                            "Detected pairing required, but no matching local node-host pending request was found for auto-approval.";
+                    }
+                    else if (approvalExecution.exitCode !== 0) {
+                        classification = "pairing_required_unresolved";
+                        const signalInfo = approvalExecution.signal ? `, signal=${approvalExecution.signal}` : "";
+                        const stderr = approvalExecution.stderr.trim();
+                        detail = `${approvalExecution.command} exited with code ${String(approvalExecution.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
+                    }
+                    else {
+                        classification = "pairing_required_approved";
+                        ok = true;
+                        detail = `${approvalExecution.command} succeeded. Continuing websocket reconnect.`;
+                    }
+                }
+                if (ok) {
+                    this.consecutiveGatewayRecoveryFailures = 0;
+                    this.lastRecoverySuccessAt = this.now().toISOString();
+                    this.recoveryPhase = "reconnecting";
+                    this.recoveryStatus = "degraded";
+                    this.recoveryDetail = detail;
+                }
+                else {
+                    this.consecutiveGatewayRecoveryFailures += 1;
+                    this.lastRecoveryFailureAt = this.now().toISOString();
+                    if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
+                        this.recoveryPhase = "manual_attention";
+                        this.recoveryStatus = "manual_attention";
+                        this.recoveryDetail =
+                            `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
+                                `${this.maxGatewayRecoveryAttempts} failed pairing recoveries.`;
+                    }
+                    else {
+                        this.recoveryPhase = "waiting_for_pairing";
+                        this.recoveryStatus = "pairing_required";
+                        this.recoveryDetail = `${detail} Continuing websocket reconnect attempts.`;
+                    }
+                }
+            }
+            else if (!this.gatewayDetector) {
                 detail = "Gateway detector is not configured for transport diagnostics.";
                 this.recoveryPhase = "manual_attention";
                 this.recoveryStatus = "manual_attention";
@@ -380,6 +450,7 @@ export class WsBackendTransport {
                     this.recoveryStatus = "recovering";
                     this.recoveryDetail =
                         `Gateway probe unhealthy (${probe.detail}). Attempting local OpenClaw runtime recovery.`;
+                    let forceManualAttention = false;
                     if (!this.gatewayCommandRunner) {
                         classification = "gateway_unhealthy_unresolved";
                         detail =
@@ -387,41 +458,62 @@ export class WsBackendTransport {
                                 "Cannot attempt local gateway recovery.";
                     }
                     else {
+                        let preflightStatus;
                         try {
-                            restartExecution = await this.gatewayCommandRunner.restart();
+                            preflightStatus = await this.gatewayCommandRunner.status();
                         }
                         catch (error) {
                             restartError = toErrorMessage(error);
                         }
-                        if (restartError) {
+                        const ambiguousPreflight = describeAmbiguousRuntimeExecution(preflightStatus);
+                        if (ambiguousPreflight) {
                             classification = "gateway_unhealthy_unresolved";
-                            detail = restartError;
-                        }
-                        else if (!restartExecution) {
-                            classification = "gateway_unhealthy_unresolved";
-                            detail = "Runtime restart did not return an execution result.";
-                        }
-                        else if (restartExecution.exitCode !== 0) {
-                            classification = "gateway_unhealthy_unresolved";
-                            const signalInfo = restartExecution.signal ? `, signal=${restartExecution.signal}` : "";
-                            const stderr = restartExecution.stderr.trim();
-                            detail =
-                                `${restartExecution.command} exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
-                                    `${stderr ? `, stderr=${stderr}` : ""}`;
+                            detail = ambiguousPreflight;
+                            forceManualAttention = true;
                         }
                         else {
-                            const verifiedProbe = await this.gatewayDetector.detect();
-                            gatewayProbe = this.toRecoveryGatewayProbe(verifiedProbe);
-                            this.lastGatewayProbe = cloneGatewayProbe(gatewayProbe);
-                            if (verifiedProbe.ok) {
-                                classification = "gateway_unhealthy_recovered";
-                                ok = true;
-                                detail = `Gateway recovered after ${restartExecution.command}. Continuing websocket reconnect.`;
+                            try {
+                                restartExecution = await this.gatewayCommandRunner.restart();
+                            }
+                            catch (error) {
+                                restartError = toErrorMessage(error);
+                            }
+                            const ambiguousRestart = describeAmbiguousRuntimeExecution(restartExecution);
+                            if (ambiguousRestart) {
+                                classification = "gateway_unhealthy_unresolved";
+                                detail = ambiguousRestart;
+                                forceManualAttention = true;
+                            }
+                            else if (restartError) {
+                                classification = "gateway_unhealthy_unresolved";
+                                detail = restartError;
+                            }
+                            else if (!restartExecution) {
+                                classification = "gateway_unhealthy_unresolved";
+                                detail = "Runtime restart did not return an execution result.";
+                            }
+                            else if (restartExecution.exitCode !== 0) {
+                                classification = "gateway_unhealthy_unresolved";
+                                const signalInfo = restartExecution.signal ? `, signal=${restartExecution.signal}` : "";
+                                const stderr = restartExecution.stderr.trim();
+                                detail =
+                                    `${restartExecution.command} exited with code ${String(restartExecution.exitCode)}${signalInfo}` +
+                                        `${stderr ? `, stderr=${stderr}` : ""}`;
                             }
                             else {
-                                classification = "gateway_unhealthy_unresolved";
-                                detail =
-                                    `${restartExecution.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+                                const verifiedProbe = await this.gatewayDetector.detect();
+                                gatewayProbe = this.toRecoveryGatewayProbe(verifiedProbe);
+                                this.lastGatewayProbe = cloneGatewayProbe(gatewayProbe);
+                                if (verifiedProbe.ok) {
+                                    classification = "gateway_unhealthy_recovered";
+                                    ok = true;
+                                    detail = `Gateway recovered after ${restartExecution.command}. Continuing websocket reconnect.`;
+                                }
+                                else {
+                                    classification = "gateway_unhealthy_unresolved";
+                                    detail =
+                                        `${restartExecution.command} succeeded but gateway probe remains unhealthy: ${verifiedProbe.detail}`;
+                                }
                             }
                         }
                     }
@@ -435,12 +527,12 @@ export class WsBackendTransport {
                     else {
                         this.consecutiveGatewayRecoveryFailures += 1;
                         this.lastRecoveryFailureAt = this.now().toISOString();
-                        if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
+                        if (forceManualAttention || this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
                             this.recoveryPhase = "manual_attention";
                             this.recoveryStatus = "manual_attention";
-                            this.recoveryDetail =
-                                `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
-                                    `${this.maxGatewayRecoveryAttempts} failed local gateway recoveries.`;
+                            this.recoveryDetail = forceManualAttention
+                                ? detail
+                                : `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/${this.maxGatewayRecoveryAttempts} failed local gateway recoveries.`;
                         }
                         else {
                             this.recoveryPhase = "reconnecting";
@@ -478,7 +570,17 @@ export class WsBackendTransport {
                         restartStderr: restartExecution.stderr
                     }
                     : {}),
-                ...(restartError ? { restartError } : {})
+                ...(restartError ? { restartError } : {}),
+                ...(approvalExecution
+                    ? {
+                        approvalCommand: approvalExecution.command,
+                        approvalExitCode: approvalExecution.exitCode,
+                        approvalSignal: approvalExecution.signal,
+                        approvalStdout: approvalExecution.stdout,
+                        approvalStderr: approvalExecution.stderr
+                    }
+                    : {}),
+                ...(approvalError ? { approvalError } : {})
             });
             this.recoveryInProgress = false;
         }
