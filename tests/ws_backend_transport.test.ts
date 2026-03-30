@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import type { ForwardedFileRequest } from "../src/backend_client.js";
-import type { GatewayCommandRunner, PairingCommandRunner } from "../src/gateway_watchdog.js";
+import type { GatewayCommandRunner } from "../src/gateway_watchdog.js";
 import { WsBackendTransport, resolveRelayWsBaseUrl } from "../src/ws_backend_transport.js";
 
 describe("resolveRelayWsBaseUrl", () => {
@@ -142,37 +142,35 @@ describe("resolveRelayWsBaseUrl", () => {
     expect(snapshot.recentRecoveryAttempts[0]?.detail).toContain("Ambiguous OpenClaw runtime state detected");
   });
 
-  test("auto-approves local node-host pairing upgrade before further recovery", async () => {
-    const approvals: string[] = [];
-    const pairingCommandRunner: PairingCommandRunner = {
-      async approveLocalNodeUpgrade() {
-        approvals.push("approve");
-        return {
-          command: "openclaw devices approve req-node-1 --json",
-          args: ["devices", "approve", "req-node-1", "--json"],
-          stdout: '{"ok":true}',
-          stderr: "",
-          exitCode: 0,
-          signal: null,
-          startedAt: "2026-03-26T01:00:00.000Z",
-          completedAt: "2026-03-26T01:00:01.000Z",
-          durationMs: 1000
-        };
-      }
-    };
-    const transport = new WsBackendTransport({ pairingCommandRunner });
+  test("moves pairing-required failures to manual attention without auto-approval", async () => {
+    const transport = new WsBackendTransport();
 
     await (transport as unknown as {
       runRecoveryDiagnosis: (lastConnectError: string) => Promise<void>;
     }).runRecoveryDiagnosis("Connection closed during handshake (code=1008): pairing required");
 
     const snapshot = transport.getRecoverySnapshot();
-    expect(approvals).toEqual(["approve"]);
-    expect(snapshot.status).toBe("degraded");
-    expect(snapshot.phase).toBe("reconnecting");
-    expect(snapshot.recentRecoveryAttempts[0]?.classification).toBe("pairing_required_approved");
-    expect(snapshot.recentRecoveryAttempts[0]?.approvalCommand).toBe(
-      "openclaw devices approve req-node-1 --json"
+    expect(snapshot.status).toBe("manual_attention");
+    expect(snapshot.phase).toBe("manual_attention");
+    expect(snapshot.recentRecoveryAttempts[0]?.classification).toBe("pairing_required_unresolved");
+    expect(snapshot.recentRecoveryAttempts[0]?.detail).toContain("Automatic recovery is blocked");
+  });
+
+  test("suppresses reconnect scheduling after pairing-required failures", () => {
+    const transport = new WsBackendTransport();
+    (transport as unknown as { context: { backendUrl: string; hostId: string; userId: string } | null }).context = {
+      backendUrl: "http://120.55.96.42:3001",
+      hostId: "host-1",
+      userId: "user-1"
+    };
+    (transport as unknown as { recordConnectFailure: (detail: string) => void }).recordConnectFailure(
+      "Connection closed during handshake (code=1008): pairing required"
     );
+    (transport as unknown as { scheduleReconnect: () => void }).scheduleReconnect();
+
+    const snapshot = transport.getRecoverySnapshot();
+    expect(snapshot.status).toBe("manual_attention");
+    expect(snapshot.phase).toBe("manual_attention");
+    expect((transport as unknown as { reconnectTimer: NodeJS.Timeout | null }).reconnectTimer).toBeNull();
   });
 });
