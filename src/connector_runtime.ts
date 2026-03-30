@@ -153,12 +153,52 @@ export class ConnectorRuntime {
         const response = await this.handleForwardedFileRequest(request);
         await this.backendClient.sendEvent(response);
       });
+      const unsubscribeHostUnbind = this.backendClient.onHostUnbind(async (control) => {
+        if (control.hostId !== activeHost.hostId) {
+          return;
+        }
 
-      const stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
+        await this.hostRegistry.unbindHost(activeHost.hostId);
+        const reasonSuffix = control.reason ? ` reason=${control.reason}` : "";
+        console.log(
+          `[connector] Host ${activeHost.hostId} was unbound remotely at ${control.requestedAt}.${reasonSuffix}`
+        );
+        await stopRuntime("connector.remote_host_unbound");
+      });
+
+      let stopSessionActivityMonitor = () => {};
+      let stopHeartbeat = () => {};
+      let stopped = false;
+      let stopPromise: Promise<void> | undefined;
+      const stopRuntime = async (reason: string): Promise<void> => {
+        if (stopped) {
+          await stopPromise;
+          return;
+        }
+        stopped = true;
+
+        stopPromise = (async () => {
+          unsubscribeForwarding();
+          unsubscribeFileForwarding();
+          unsubscribeHostUnbind();
+          stopSessionActivityMonitor();
+          stopHeartbeat();
+          stopGatewayWatchdog();
+          await this.backendClient.disconnect(reason);
+        })();
+
+        try {
+          await stopPromise;
+        } finally {
+          stopPromise = undefined;
+        }
+      };
+
+      stopSessionActivityMonitor = sessionActivityMonitor.start((activities) => {
         runtimeStatusTracker.updateOpenClawSessionActivities(activities);
       });
 
-      const stopHeartbeat = this.heartbeatManager.start({
+      stopHeartbeat = this.heartbeatManager.start({
         hostId: activeHost.hostId,
         sendEvent: async (event) => {
           await this.backendClient.sendEvent(event);
@@ -167,22 +207,11 @@ export class ConnectorRuntime {
         agentStatusProviders: runtimeStatusTracker.getAgentStatusProviders()
       });
 
-      let stopped = false;
       return {
         host: activeHost,
         startedAt: this.now().toISOString(),
         stop: async () => {
-          if (stopped) {
-            return;
-          }
-          stopped = true;
-
-          unsubscribeForwarding();
-          unsubscribeFileForwarding();
-          stopSessionActivityMonitor();
-          stopHeartbeat();
-          stopGatewayWatchdog();
-          await this.backendClient.disconnect("connector.stop");
+          await stopRuntime("connector.stop");
         }
       };
     } catch (error) {

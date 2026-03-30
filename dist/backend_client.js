@@ -18,6 +18,7 @@ export class BackendClient {
     onUnhandledRequestError;
     chatRequestListeners = new Set();
     fileRequestListeners = new Set();
+    hostUnbindListeners = new Set();
     connected = false;
     constructor(options) {
         this.transport = options.transport;
@@ -35,6 +36,11 @@ export class BackendClient {
         });
         this.transport.onForwardedFileRequest((request) => {
             void this.dispatchForwardedFileRequest(request).catch((error) => {
+                this.onUnhandledRequestError(error);
+            });
+        });
+        this.transport.onHostUnbind((control) => {
+            void this.dispatchHostUnbind(control).catch((error) => {
                 this.onUnhandledRequestError(error);
             });
         });
@@ -58,6 +64,12 @@ export class BackendClient {
         this.fileRequestListeners.add(listener);
         return () => {
             this.fileRequestListeners.delete(listener);
+        };
+    }
+    onHostUnbind(listener) {
+        this.hostUnbindListeners.add(listener);
+        return () => {
+            this.hostUnbindListeners.delete(listener);
         };
     }
     async connect(context) {
@@ -92,6 +104,11 @@ export class BackendClient {
     async dispatchForwardedFileRequest(request) {
         for (const listener of this.fileRequestListeners) {
             await listener(request);
+        }
+    }
+    async dispatchHostUnbind(control) {
+        for (const listener of this.hostUnbindListeners) {
+            await listener(control);
         }
     }
 }
