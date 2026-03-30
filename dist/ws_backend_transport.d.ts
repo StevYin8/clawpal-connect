@@ -1,14 +1,13 @@
 import WebSocket from "ws";
-import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, TransportRecoverySnapshot } from "./backend_client.js";
+import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, HostUnbindHandler, TransportRecoverySnapshot } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
-import { type GatewayCommandRunner, type PairingCommandRunner } from "./gateway_watchdog.js";
+import { type GatewayCommandRunner } from "./gateway_watchdog.js";
 interface GatewayProbeDetector {
     detect(): Promise<GatewayProbeResult>;
 }
 export interface WsBackendTransportOptions {
     gatewayDetector?: GatewayProbeDetector;
     gatewayCommandRunner?: GatewayCommandRunner;
-    pairingCommandRunner?: PairingCommandRunner;
     connectTimeoutMs?: number;
     reconnectDelayMs?: number;
     maxReconnectDelayMs?: number;
@@ -28,7 +27,6 @@ export declare class WsBackendTransport implements BackendTransport {
     readonly name = "ws";
     private readonly gatewayDetector;
     private readonly gatewayCommandRunner;
-    private readonly pairingCommandRunner;
     private readonly connectTimeoutMs;
     private readonly reconnectDelayMs;
     private readonly maxReconnectDelayMs;
@@ -44,6 +42,7 @@ export declare class WsBackendTransport implements BackendTransport {
     private connected;
     private forwardedRequestHandler;
     private forwardedFileRequestHandler;
+    private hostUnbindHandler;
     private readonly sentEvents;
     private readonly waiters;
     private recoveryPhase;
@@ -71,6 +70,7 @@ export declare class WsBackendTransport implements BackendTransport {
     constructor(options?: WsBackendTransportOptions);
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
+    onHostUnbind(handler: HostUnbindHandler): void;
     connect(context: BackendConnectionContext): Promise<void>;
     private scheduleReconnect;
     getRecoverySnapshot(): TransportRecoverySnapshot;
@@ -81,6 +81,7 @@ export declare class WsBackendTransport implements BackendTransport {
     private pushRecoveryAttempt;
     private handleRelayMessage;
     private parseForwardedFileRequest;
+    private parseHostUnbindControl;
     disconnect(reason?: string): Promise<void>;
     sendEvent(event: ConnectorEvent): Promise<void>;
     isConnected(): boolean;

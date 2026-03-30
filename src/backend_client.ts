@@ -59,6 +59,13 @@ export interface ForwardedFileSetRequest extends ForwardedFileRequestBase {
 
 export type ForwardedFileRequest = ForwardedFileListRequest | ForwardedFileGetRequest | ForwardedFileSetRequest;
 
+export interface HostUnbindControl {
+  hostId: string;
+  userId?: string;
+  reason?: string;
+  requestedAt: string;
+}
+
 export interface HostStatusEvent {
   type: "host.status";
   hostId: string;
@@ -170,6 +177,7 @@ export type ConnectorEventInput =
 
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
+export type HostUnbindHandler = (control: HostUnbindControl) => Promise<void> | void;
 
 export type TransportRecoveryPhase =
   | "unsupported"
@@ -275,6 +283,7 @@ export interface BackendTransport {
   disconnect(reason?: string): Promise<void>;
   onForwardedRequest(handler: ForwardedRequestHandler): void;
   onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
+  onHostUnbind(handler: HostUnbindHandler): void;
   sendEvent(event: ConnectorEvent): Promise<void>;
   getRecoverySnapshot?(): TransportRecoverySnapshot;
 }
@@ -291,6 +300,7 @@ export class BackendClient {
   private readonly onUnhandledRequestError: (error: unknown) => void;
   private readonly chatRequestListeners = new Set<ForwardedRequestHandler>();
   private readonly fileRequestListeners = new Set<ForwardedFileRequestHandler>();
+  private readonly hostUnbindListeners = new Set<HostUnbindHandler>();
   private connected = false;
 
   constructor(options: BackendClientOptions) {
@@ -310,6 +320,11 @@ export class BackendClient {
     });
     this.transport.onForwardedFileRequest((request) => {
       void this.dispatchForwardedFileRequest(request).catch((error) => {
+        this.onUnhandledRequestError(error);
+      });
+    });
+    this.transport.onHostUnbind((control) => {
+      void this.dispatchHostUnbind(control).catch((error) => {
         this.onUnhandledRequestError(error);
       });
     });
@@ -338,6 +353,13 @@ export class BackendClient {
     this.fileRequestListeners.add(listener);
     return () => {
       this.fileRequestListeners.delete(listener);
+    };
+  }
+
+  onHostUnbind(listener: HostUnbindHandler): () => void {
+    this.hostUnbindListeners.add(listener);
+    return () => {
+      this.hostUnbindListeners.delete(listener);
     };
   }
 
@@ -378,6 +400,12 @@ export class BackendClient {
   private async dispatchForwardedFileRequest(request: ForwardedFileRequest): Promise<void> {
     for (const listener of this.fileRequestListeners) {
       await listener(request);
+    }
+  }
+
+  private async dispatchHostUnbind(control: HostUnbindControl): Promise<void> {
+    for (const listener of this.hostUnbindListeners) {
+      await listener(control);
     }
   }
 }

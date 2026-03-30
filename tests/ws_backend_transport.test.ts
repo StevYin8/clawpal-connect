@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import type { ForwardedFileRequest } from "../src/backend_client.js";
+import type { ForwardedFileRequest, HostUnbindControl } from "../src/backend_client.js";
 import type { GatewayCommandRunner } from "../src/gateway_watchdog.js";
 import { WsBackendTransport, resolveRelayWsBaseUrl } from "../src/ws_backend_transport.js";
 
@@ -71,6 +71,31 @@ describe("resolveRelayWsBaseUrl", () => {
     });
 
     expect(callCount).toBe(0);
+  });
+
+  test("dispatches relay.host_unbind payloads to host-unbind handler", () => {
+    const transport = new WsBackendTransport();
+    let received: HostUnbindControl | undefined;
+    transport.onHostUnbind((control) => {
+      received = control;
+    });
+
+    (transport as unknown as { handleRelayMessage: (payload: Record<string, unknown>) => void }).handleRelayMessage({
+      type: "relay.host_unbind",
+      control: {
+        hostId: "host-1",
+        userId: "user-1",
+        reason: "host_deleted",
+        requestedAt: "2026-03-30T09:30:00.000Z"
+      }
+    });
+
+    expect(received).toEqual({
+      hostId: "host-1",
+      userId: "user-1",
+      reason: "host_deleted",
+      requestedAt: "2026-03-30T09:30:00.000Z"
+    });
   });
 
   test("moves to manual attention when gateway ownership is ambiguous", async () => {

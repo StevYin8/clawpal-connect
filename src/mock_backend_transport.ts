@@ -11,7 +11,9 @@ import type {
   ForwardedFileRequest,
   ForwardedFileRequestHandler,
   ForwardedRequest,
-  ForwardedRequestHandler
+  ForwardedRequestHandler,
+  HostUnbindControl,
+  HostUnbindHandler
 } from "./backend_client.js";
 
 interface EventWaiter {
@@ -111,6 +113,20 @@ export function createMockForwardedFileRequest(input: MockForwardedFileRequestIn
   };
 }
 
+export function createMockHostUnbindControl(input: {
+  hostId: string;
+  userId?: string;
+  reason?: string;
+  requestedAt?: string;
+}): HostUnbindControl {
+  return {
+    hostId: input.hostId,
+    ...(input.userId ? { userId: input.userId } : {}),
+    ...(input.reason ? { reason: input.reason } : {}),
+    requestedAt: input.requestedAt ?? new Date().toISOString()
+  };
+}
+
 export class MockBackendTransport implements BackendTransport {
   readonly name = "mock";
 
@@ -118,6 +134,9 @@ export class MockBackendTransport implements BackendTransport {
     return;
   };
   private forwardedFileRequestHandler: ForwardedFileRequestHandler = async () => {
+    return;
+  };
+  private hostUnbindHandler: HostUnbindHandler = async () => {
     return;
   };
   private connected = false;
@@ -131,6 +150,10 @@ export class MockBackendTransport implements BackendTransport {
 
   onForwardedFileRequest(handler: ForwardedFileRequestHandler): void {
     this.forwardedFileRequestHandler = handler;
+  }
+
+  onHostUnbind(handler: HostUnbindHandler): void {
+    this.hostUnbindHandler = handler;
   }
 
   async connect(context: BackendConnectionContext): Promise<void> {
@@ -181,6 +204,13 @@ export class MockBackendTransport implements BackendTransport {
       throw new Error("Mock backend transport is not connected.");
     }
     await this.forwardedFileRequestHandler(request);
+  }
+
+  async forwardHostUnbind(control: HostUnbindControl): Promise<void> {
+    if (!this.connected) {
+      throw new Error("Mock backend transport is not connected.");
+    }
+    await this.hostUnbindHandler(control);
   }
 
   waitForEvent(predicate: (event: ConnectorEvent) => boolean, timeoutMs = 3_000): Promise<ConnectorEvent> {
