@@ -501,9 +501,16 @@ export async function startPairingSession(options) {
                 body: JSON.stringify({
                     hostId,
                     hostName,
+                    ...(options.resetOwner ? { resetOwner: true } : {}),
+                    ...(options.connectorToken?.trim()
+                        ? { connectorToken: options.connectorToken.trim() }
+                        : {}),
                     connector: {
                         hostId,
-                        hostName
+                        hostName,
+                        ...(options.connectorToken?.trim()
+                            ? { connectorToken: options.connectorToken.trim() }
+                            : {}),
                     }
                 })
             });

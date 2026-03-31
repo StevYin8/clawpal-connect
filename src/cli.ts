@@ -752,10 +752,16 @@ async function prepareFreshPairingReset(
 ): Promise<RegisteredHost | null> {
   const activeHost = await registry.getActiveHost();
   if (!activeHost) {
+    console.log('[pair-new] no active host binding found locally; skipping local unbind step');
     return null;
   }
 
+  console.log(
+    `[pair-new] active host found: hostId=${activeHost.hostId} userId=${activeHost.userId} hasConnectorToken=${Boolean(activeHost.connectorToken?.trim())} connectorTokenLength=${activeHost.connectorToken?.trim().length ?? 0}`
+  );
+
   await registry.unbindHost(activeHost.hostId);
+  console.log(`[pair-new] local registry unbound: hostId=${activeHost.hostId}`);
   await runtimeConfigStore.updateConfig({
     gatewayUrl: DEFAULT_RUNTIME_GATEWAY_URL,
     gatewayToken: "",
@@ -766,7 +772,9 @@ async function prepareFreshPairingReset(
   return activeHost;
 }
 
-async function runPairCommand(options: PairCliOptions): Promise<void> {
+async function runPairCommand(
+  options: PairCliOptions & { resetOwner?: boolean; connectorToken?: string }
+): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
   const backendUrl = resolveBackendUrl(options.backendUrl);
@@ -777,7 +785,9 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
     backendUrl,
     hostId,
     hostName,
-    reason: "manual"
+    reason: "manual",
+    ...(options.resetOwner ? { resetOwner: true } : {}),
+    ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
   });
 
   const { activeHost, runtimeConfig } = await persistPairingResolution({
