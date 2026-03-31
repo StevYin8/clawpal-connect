@@ -616,6 +616,8 @@ async function requestAndWaitForPairing(options: {
   hostId: string;
   hostName: string;
   reason: "no_binding" | "manual";
+  resetOwner?: boolean;
+  connectorToken?: string;
 }) {
   if (options.reason === "no_binding") {
     console.log("No local binding found. Starting a new pairing session...");
@@ -626,7 +628,9 @@ async function requestAndWaitForPairing(options: {
   const session = await startPairingSession({
     backendUrl: options.backendUrl,
     hostId: options.hostId,
-    hostName: options.hostName
+    hostName: options.hostName,
+    ...(options.resetOwner ? { resetOwner: true } : {}),
+    ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
   });
 
   console.log(`pairing code=${session.code}`);
@@ -742,43 +746,13 @@ async function runStatusCommand(options: GatewayCliOptions): Promise<void> {
   }
 }
 
-async function releaseCurrentBindingForRebind(
+async function prepareFreshPairingReset(
   registry: HostRegistry,
-  runtimeConfigStore: RuntimeConfigStore,
-  backendUrl: string,
-  force = false
-): Promise<void> {
+  runtimeConfigStore: RuntimeConfigStore
+): Promise<RegisteredHost | null> {
   const activeHost = await registry.getActiveHost();
   if (!activeHost) {
-    return;
-  }
-
-  const deleteUrl = new URL(
-    `/api/v1/hosts/${encodeURIComponent(activeHost.hostId)}`,
-    backendUrl.endsWith("/") ? backendUrl : `${backendUrl}/`
-  );
-  deleteUrl.searchParams.set("userId", activeHost.userId);
-
-  const response = await fetch(deleteUrl, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ hostId: activeHost.hostId, userId: activeHost.userId })
-  }).catch((error) => {
-    if (!force) {
-      throw error;
-    }
-    console.warn(`warn=delete previous binding failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
-  });
-
-  if (response && !response.ok) {
-    const bodyText = await response.text();
-    if (!force) {
-      throw new Error(`Failed to release existing host binding (${response.status}): ${bodyText || response.statusText}`);
-    }
-    console.warn(`warn=delete previous binding failed status=${response.status} body=${JSON.stringify(bodyText)}`);
-  } else if (response) {
-    console.log(`released previous host binding=${activeHost.hostId} user=${activeHost.userId}`);
   }
 
   await registry.unbindHost(activeHost.hostId);
@@ -789,9 +763,12 @@ async function releaseCurrentBindingForRebind(
     heartbeatMs: DEFAULT_RUNTIME_HEARTBEAT_MS,
     transport: "ws"
   });
+  return activeHost;
 }
 
-async function runPairCommand(options: PairCliOptions): Promise<void> {
+async function runPairCommand(
+  options: PairCliOptions & { resetOwner?: boolean; connectorToken?: string }
+): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
   const backendUrl = resolveBackendUrl(options.backendUrl);
@@ -802,7 +779,9 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
     backendUrl,
     hostId,
     hostName,
-    reason: "manual"
+    reason: "manual",
+    ...(options.resetOwner ? { resetOwner: true } : {}),
+    ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
   });
 
   const { activeHost, runtimeConfig } = await persistPairingResolution({
@@ -844,10 +823,23 @@ async function runPairCommand(options: PairCliOptions): Promise<void> {
 async function runPairNewCommand(options: PairNewCliOptions): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
-  const backendUrl = resolveBackendUrl(options.backendUrl);
+  const activeHost = await prepareFreshPairingReset(registry, runtimeConfigStore);
 
-  await releaseCurrentBindingForRebind(registry, runtimeConfigStore, backendUrl, options.force ?? false);
-  await runPairCommand(options);
+  try {
+    await runPairCommand({
+      ...options,
+      ...(activeHost?.connectorToken ? { connectorToken: activeHost.connectorToken } : {}),
+      ...(activeHost ? { hostName: activeHost.hostName } : {}),
+      backendUrl: resolveBackendUrl(options.backendUrl),
+      resetOwner: true,
+    });
+  } catch (error) {
+    if (!(options.force ?? false)) {
+      throw error;
+    }
+    console.warn(`warn=fresh pairing reset failed: ${error instanceof Error ? error.message : String(error)}`);
+    await runPairCommand(options);
+  }
 }
 
 async function runBindCommand(options: BindCliOptions): Promise<void> {

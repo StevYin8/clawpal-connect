@@ -66,6 +66,8 @@ export interface PairingSessionStartOptions {
   backendUrl: string;
   hostId: string;
   hostName?: string;
+  connectorToken?: string;
+  resetOwner?: boolean;
   fetchImpl?: typeof fetch;
   paths?: readonly string[];
 }

@@ -387,7 +387,9 @@ async function requestAndWaitForPairing(options) {
     const session = await startPairingSession({
         backendUrl: options.backendUrl,
         hostId: options.hostId,
-        hostName: options.hostName
+        hostName: options.hostName,
+        ...(options.resetOwner ? { resetOwner: true } : {}),
+        ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
     });
     console.log(`pairing code=${session.code}`);
     if (session.expiresAt) {
@@ -478,33 +480,10 @@ async function runStatusCommand(options) {
         process.exitCode = 2;
     }
 }
-async function releaseCurrentBindingForRebind(registry, runtimeConfigStore, backendUrl, force = false) {
+async function prepareFreshPairingReset(registry, runtimeConfigStore) {
     const activeHost = await registry.getActiveHost();
     if (!activeHost) {
-        return;
-    }
-    const deleteUrl = new URL(`/api/v1/hosts/${encodeURIComponent(activeHost.hostId)}`, backendUrl.endsWith("/") ? backendUrl : `${backendUrl}/`);
-    deleteUrl.searchParams.set("userId", activeHost.userId);
-    const response = await fetch(deleteUrl, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hostId: activeHost.hostId, userId: activeHost.userId })
-    }).catch((error) => {
-        if (!force) {
-            throw error;
-        }
-        console.warn(`warn=delete previous binding failed: ${error instanceof Error ? error.message : String(error)}`);
         return null;
-    });
-    if (response && !response.ok) {
-        const bodyText = await response.text();
-        if (!force) {
-            throw new Error(`Failed to release existing host binding (${response.status}): ${bodyText || response.statusText}`);
-        }
-        console.warn(`warn=delete previous binding failed status=${response.status} body=${JSON.stringify(bodyText)}`);
-    }
-    else if (response) {
-        console.log(`released previous host binding=${activeHost.hostId} user=${activeHost.userId}`);
     }
     await registry.unbindHost(activeHost.hostId);
     await runtimeConfigStore.updateConfig({
@@ -514,6 +493,7 @@ async function releaseCurrentBindingForRebind(registry, runtimeConfigStore, back
         heartbeatMs: DEFAULT_RUNTIME_HEARTBEAT_MS,
         transport: "ws"
     });
+    return activeHost;
 }
 async function runPairCommand(options) {
     const registry = buildHostRegistry(options);
@@ -525,7 +505,9 @@ async function runPairCommand(options) {
         backendUrl,
         hostId,
         hostName,
-        reason: "manual"
+        reason: "manual",
+        ...(options.resetOwner ? { resetOwner: true } : {}),
+        ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
     });
     const { activeHost, runtimeConfig } = await persistPairingResolution({
         registry,
@@ -563,9 +545,23 @@ async function runPairCommand(options) {
 async function runPairNewCommand(options) {
     const registry = buildHostRegistry(options);
     const runtimeConfigStore = buildRuntimeConfigStore(options);
-    const backendUrl = resolveBackendUrl(options.backendUrl);
-    await releaseCurrentBindingForRebind(registry, runtimeConfigStore, backendUrl, options.force ?? false);
-    await runPairCommand(options);
+    const activeHost = await prepareFreshPairingReset(registry, runtimeConfigStore);
+    try {
+        await runPairCommand({
+            ...options,
+            ...(activeHost?.connectorToken ? { connectorToken: activeHost.connectorToken } : {}),
+            ...(activeHost ? { hostName: activeHost.hostName } : {}),
+            backendUrl: resolveBackendUrl(options.backendUrl),
+            resetOwner: true,
+        });
+    }
+    catch (error) {
+        if (!(options.force ?? false)) {
+            throw error;
+        }
+        console.warn(`warn=fresh pairing reset failed: ${error instanceof Error ? error.message : String(error)}`);
+        await runPairCommand(options);
+    }
 }
 async function runBindCommand(options) {
     const registry = buildHostRegistry(options);
