@@ -11,6 +11,8 @@ import type {
   ForwardedFileRequestHandler,
   ForwardedRequest,
   ForwardedRequestHandler,
+  HostUnbindControl,
+  HostUnbindHandler,
   HostConnectionStatus,
   TransportRecoveryAttemptRecord,
   TransportRecoveryGatewayProbe,
@@ -18,12 +20,10 @@ import type {
 } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
 import {
-  OpenClawDevicePairingCommandRunner,
   OpenClawGatewayCommandRunner,
   describeAmbiguousRuntimeExecution,
   type GatewayCommandExecution,
-  type GatewayCommandRunner,
-  type PairingCommandRunner
+  type GatewayCommandRunner
 } from "./gateway_watchdog.js";
 
 interface EventWaiter {
@@ -40,7 +40,6 @@ interface GatewayProbeDetector {
 export interface WsBackendTransportOptions {
   gatewayDetector?: GatewayProbeDetector;
   gatewayCommandRunner?: GatewayCommandRunner;
-  pairingCommandRunner?: PairingCommandRunner;
   connectTimeoutMs?: number;
   reconnectDelayMs?: number;
   maxReconnectDelayMs?: number;
@@ -58,6 +57,12 @@ const AGENT_FILES_OPERATIONS: readonly AgentFilesOperation[] = [
   "agents.files.get",
   "agents.files.set"
 ];
+const HOST_UNBIND_MESSAGE_TYPES = new Set([
+  "relay.host_unbind",
+  "relay.host.unbind",
+  "relay.control.host_unbind"
+]);
+const HOST_UNBIND_CONTROL_TYPES = new Set(["host_unbind", "host.unbind"]);
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
@@ -154,7 +159,6 @@ export class WsBackendTransport implements BackendTransport {
 
   private readonly gatewayDetector: GatewayProbeDetector | undefined;
   private readonly gatewayCommandRunner: GatewayCommandRunner | undefined;
-  private readonly pairingCommandRunner: PairingCommandRunner | undefined;
   private readonly connectTimeoutMs: number;
   private readonly reconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
@@ -171,6 +175,7 @@ export class WsBackendTransport implements BackendTransport {
   private connected = false;
   private forwardedRequestHandler: ForwardedRequestHandler = async () => {};
   private forwardedFileRequestHandler: ForwardedFileRequestHandler = async () => {};
+  private hostUnbindHandler: HostUnbindHandler = async () => {};
   private readonly sentEvents: ConnectorEvent[] = [];
   private readonly waiters: EventWaiter[] = [];
   private recoveryPhase: TransportRecoverySnapshot["phase"] = "idle";
@@ -200,7 +205,6 @@ export class WsBackendTransport implements BackendTransport {
     this.gatewayDetector = options.gatewayDetector;
     this.gatewayCommandRunner =
       options.gatewayCommandRunner ?? (this.gatewayDetector ? new OpenClawGatewayCommandRunner() : undefined);
-    this.pairingCommandRunner = options.pairingCommandRunner ?? new OpenClawDevicePairingCommandRunner();
     this.connectTimeoutMs = normalizePositiveInt(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS);
     this.reconnectDelayMs = normalizePositiveInt(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
     this.maxReconnectDelayMs = normalizePositiveInt(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS);
@@ -225,6 +229,10 @@ export class WsBackendTransport implements BackendTransport {
 
   onForwardedFileRequest(handler: ForwardedFileRequestHandler): void {
     this.forwardedFileRequestHandler = handler;
+  }
+
+  onHostUnbind(handler: HostUnbindHandler): void {
+    this.hostUnbindHandler = handler;
   }
 
   async connect(context: BackendConnectionContext): Promise<void> {
@@ -331,6 +339,19 @@ export class WsBackendTransport implements BackendTransport {
       console.log("[ws] No context for reconnect");
       return;
     }
+    if (this.recoveryStatus === "manual_attention" || this.recoveryPhase === "manual_attention") {
+      console.log("[ws] Reconnect suppressed: transport is in manual_attention state.");
+      return;
+    }
+    if (this.lastFailureDetail && isPairingRequiredError(this.lastFailureDetail)) {
+      this.recoveryPhase = "manual_attention";
+      this.recoveryStatus = "manual_attention";
+      this.recoveryDetail =
+        "Detected node-host pairing/role-upgrade requirement against the local OpenClaw gateway. " +
+        "Automatic reconnect is blocked; fix the local runtime topology or manually pair node-host if intentional.";
+      console.log("[ws] Reconnect suppressed: pairing/role-upgrade requires manual attention.");
+      return;
+    }
     if (this.reconnecting || this.reconnectTimer) {
       return;
     }
@@ -401,6 +422,16 @@ export class WsBackendTransport implements BackendTransport {
     this.lastConnectFailureAt = this.now().toISOString();
     this.lastFailureDetail = normalizedDetail;
 
+    if (isPairingRequiredError(normalizedDetail)) {
+      this.recoveryPhase = "manual_attention";
+      this.recoveryStatus = "manual_attention";
+      this.recoveryDetail =
+        `Detected node-host pairing/role-upgrade requirement: ${normalizedDetail}. ` +
+        "Automatic reconnect is blocked; if this machine is your primary OpenClaw gateway host, keep only gateway service. " +
+        "If node-host is intentional, complete pairing manually before retrying.";
+      return;
+    }
+
     if (this.consecutiveConnectFailures < this.recoveryConsecutiveFailureThreshold) {
       this.recoveryPhase = "reconnecting";
       this.recoveryStatus = "degraded";
@@ -452,70 +483,22 @@ export class WsBackendTransport implements BackendTransport {
     let gatewayProbe: TransportRecoveryGatewayProbe | undefined;
     let restartExecution: GatewayCommandExecution | undefined;
     let restartError: string | undefined;
-    let approvalExecution: GatewayCommandExecution | undefined;
-    let approvalError: string | undefined;
     let classification: TransportRecoveryAttemptRecord["classification"] = "diagnostic_error";
     let ok = false;
     let detail = "";
 
     try {
       if (isPairingRequiredError(lastConnectError)) {
-        this.recoveryPhase = "waiting_for_pairing";
-        this.recoveryStatus = "pairing_required";
-        this.recoveryDetail =
-          `Detected pairing/role-upgrade requirement from transport error: ${lastConnectError}. ` +
-          "Attempting local node-host approval.";
-
-        if (!this.pairingCommandRunner) {
-          classification = "pairing_required_unresolved";
-          detail = "Pairing approval runner is not configured.";
-        } else {
-          try {
-            approvalExecution = await this.pairingCommandRunner.approveLocalNodeUpgrade();
-          } catch (error) {
-            approvalError = toErrorMessage(error);
-          }
-
-          if (approvalError) {
-            classification = "pairing_required_unresolved";
-            detail = approvalError;
-          } else if (!approvalExecution) {
-            classification = "pairing_required_unresolved";
-            detail =
-              "Detected pairing required, but no matching local node-host pending request was found for auto-approval.";
-          } else if (approvalExecution.exitCode !== 0) {
-            classification = "pairing_required_unresolved";
-            const signalInfo = approvalExecution.signal ? `, signal=${approvalExecution.signal}` : "";
-            const stderr = approvalExecution.stderr.trim();
-            detail = `${approvalExecution.command} exited with code ${String(approvalExecution.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
-          } else {
-            classification = "pairing_required_approved";
-            ok = true;
-            detail = `${approvalExecution.command} succeeded. Continuing websocket reconnect.`;
-          }
-        }
-
-        if (ok) {
-          this.consecutiveGatewayRecoveryFailures = 0;
-          this.lastRecoverySuccessAt = this.now().toISOString();
-          this.recoveryPhase = "reconnecting";
-          this.recoveryStatus = "degraded";
-          this.recoveryDetail = detail;
-        } else {
-          this.consecutiveGatewayRecoveryFailures += 1;
-          this.lastRecoveryFailureAt = this.now().toISOString();
-          if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
-            this.recoveryPhase = "manual_attention";
-            this.recoveryStatus = "manual_attention";
-            this.recoveryDetail =
-              `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
-              `${this.maxGatewayRecoveryAttempts} failed pairing recoveries.`;
-          } else {
-            this.recoveryPhase = "waiting_for_pairing";
-            this.recoveryStatus = "pairing_required";
-            this.recoveryDetail = `${detail} Continuing websocket reconnect attempts.`;
-          }
-        }
+        classification = "pairing_required_unresolved";
+        detail =
+          `Detected node-host pairing/role-upgrade requirement from transport error: ${lastConnectError}. ` +
+          "Automatic recovery is blocked. If this machine is the primary OpenClaw gateway host, do not run node-host recovery here. " +
+          "If node-host is intentional, complete device pairing manually before reconnecting.";
+        this.consecutiveGatewayRecoveryFailures += 1;
+        this.lastRecoveryFailureAt = this.now().toISOString();
+        this.recoveryPhase = "manual_attention";
+        this.recoveryStatus = "manual_attention";
+        this.recoveryDetail = detail;
       } else if (!this.gatewayDetector) {
         detail = "Gateway detector is not configured for transport diagnostics.";
         this.recoveryPhase = "manual_attention";
@@ -651,16 +634,6 @@ export class WsBackendTransport implements BackendTransport {
             }
           : {}),
         ...(restartError ? { restartError } : {}),
-        ...(approvalExecution
-          ? {
-              approvalCommand: approvalExecution.command,
-              approvalExitCode: approvalExecution.exitCode,
-              approvalSignal: approvalExecution.signal,
-              approvalStdout: approvalExecution.stdout,
-              approvalStderr: approvalExecution.stderr
-            }
-          : {}),
-        ...(approvalError ? { approvalError } : {})
       });
       this.recoveryInProgress = false;
     }
@@ -716,8 +689,14 @@ export class WsBackendTransport implements BackendTransport {
         break;
       }
 
-      default:
+      default: {
+        const hostUnbindControl = this.parseHostUnbindControl(type, payload);
+        if (hostUnbindControl) {
+          this.hostUnbindHandler(hostUnbindControl);
+          break;
+        }
         console.log(`[ws] Unknown message type: ${type}`);
+      }
     }
   }
 
@@ -784,6 +763,36 @@ export class WsBackendTransport implements BackendTransport {
       operation,
       payload: setPayload,
       createdAt
+    };
+  }
+
+  private parseHostUnbindControl(type: string, payload: Record<string, unknown>): HostUnbindControl | undefined {
+    const controlEnvelope = asRecord(payload.control) ?? asRecord(payload.payload) ?? {};
+    const controlType = readOptionalString(payload.controlType) ?? readOptionalString(controlEnvelope.type);
+    const matchesType = HOST_UNBIND_MESSAGE_TYPES.has(type);
+    const matchesControlType = type === "relay.control" && controlType !== undefined && HOST_UNBIND_CONTROL_TYPES.has(controlType);
+    if (!matchesType && !matchesControlType) {
+      return undefined;
+    }
+
+    const hostId = readOptionalString(controlEnvelope.hostId) ?? readOptionalString(payload.hostId);
+    if (!hostId) {
+      return undefined;
+    }
+
+    const userId = readOptionalString(controlEnvelope.userId) ?? readOptionalString(payload.userId);
+    const reason = readOptionalString(controlEnvelope.reason) ?? readOptionalString(payload.reason);
+    const requestedAt =
+      readOptionalString(controlEnvelope.requestedAt) ??
+      readOptionalString(controlEnvelope.createdAt) ??
+      readOptionalString(payload.at) ??
+      new Date().toISOString();
+
+    return {
+      hostId,
+      ...(userId ? { userId } : {}),
+      ...(reason ? { reason } : {}),
+      requestedAt
     };
   }
 
