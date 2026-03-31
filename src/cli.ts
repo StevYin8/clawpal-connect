@@ -766,9 +766,7 @@ async function prepareFreshPairingReset(
   return activeHost;
 }
 
-async function runPairCommand(
-  options: PairCliOptions & { resetOwner?: boolean; connectorToken?: string }
-): Promise<void> {
+async function runPairCommand(options: PairCliOptions): Promise<void> {
   const registry = buildHostRegistry(options);
   const runtimeConfigStore = buildRuntimeConfigStore(options);
   const backendUrl = resolveBackendUrl(options.backendUrl);
@@ -779,9 +777,7 @@ async function runPairCommand(
     backendUrl,
     hostId,
     hostName,
-    reason: "manual",
-    ...(options.resetOwner ? { resetOwner: true } : {}),
-    ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
+    reason: "manual"
   });
 
   const { activeHost, runtimeConfig } = await persistPairingResolution({
@@ -832,7 +828,7 @@ async function runPairNewCommand(options: PairNewCliOptions): Promise<void> {
       ...(activeHost ? { hostName: activeHost.hostName } : {}),
       backendUrl: resolveBackendUrl(options.backendUrl),
       resetOwner: true,
-    });
+    } as PairCliOptions & { resetOwner: boolean; connectorToken?: string });
   } catch (error) {
     if (!(options.force ?? false)) {
       throw error;

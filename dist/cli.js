@@ -505,9 +505,7 @@ async function runPairCommand(options) {
         backendUrl,
         hostId,
         hostName,
-        reason: "manual",
-        ...(options.resetOwner ? { resetOwner: true } : {}),
-        ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
+        reason: "manual"
     });
     const { activeHost, runtimeConfig } = await persistPairingResolution({
         registry,
