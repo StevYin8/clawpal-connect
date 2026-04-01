@@ -6,11 +6,19 @@ import type {
   AgentFilesResponseOkEvent,
   AgentFilesSetRequestPayload,
   ForwardedFileRequest,
+  GatewayRestartControl,
   TransportRecoverySnapshot
 } from "./backend_client.js";
 import { BackendClient } from "./backend_client.js";
 import { GatewayDetector, type GatewayProbeResult } from "./gateway_detector.js";
-import { GatewayWatchdog, type GatewayWatchdogLifecycle, type GatewayWatchdogSnapshot } from "./gateway_watchdog.js";
+import {
+  GatewayWatchdog,
+  OpenClawGatewayCommandRunner,
+  type GatewayCommandExecution,
+  type GatewayCommandRunner,
+  type GatewayWatchdogLifecycle,
+  type GatewayWatchdogSnapshot
+} from "./gateway_watchdog.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { HostRegistry, type HostRegistryState, type RegisteredHost } from "./host_registry.js";
 import {
@@ -55,6 +63,7 @@ interface ConnectorRuntimeOptions {
   fileBridgeService?: ConnectorFileBridgeService;
   heartbeatManager?: HeartbeatManager;
   gatewayWatchdog?: GatewayWatchdogLifecycle;
+  gatewayCommandRunner?: GatewayCommandRunner;
   syncedAgentIdProvider?: SyncedAgentIdProvider;
   sessionActivityMonitorFactory?: SessionActivityMonitorFactory;
   now?: () => Date;
@@ -68,6 +77,7 @@ export class ConnectorRuntime {
   private readonly fileBridgeService: ConnectorFileBridgeService;
   private readonly heartbeatManager: HeartbeatManager;
   private readonly gatewayWatchdog: GatewayWatchdogLifecycle;
+  private readonly gatewayCommandRunner: GatewayCommandRunner;
   private readonly syncedAgentIdProvider: SyncedAgentIdProvider;
   private readonly sessionActivityMonitorFactory: SessionActivityMonitorFactory;
   private readonly now: () => Date;
@@ -90,6 +100,7 @@ export class ConnectorRuntime {
     this.gatewayWatchdog = options.gatewayWatchdog ?? new GatewayWatchdog({
       gatewayDetector: this.gatewayDetector
     });
+    this.gatewayCommandRunner = options.gatewayCommandRunner ?? new OpenClawGatewayCommandRunner();
   }
 
   async createStatusSnapshot(): Promise<ConnectorStatusSnapshot> {
@@ -165,6 +176,13 @@ export class ConnectorRuntime {
         );
         await stopRuntime("connector.remote_host_unbound");
       });
+      const unsubscribeGatewayRestart = this.backendClient.onGatewayRestart(async (control) => {
+        if (control.hostId !== activeHost.hostId) {
+          return;
+        }
+
+        await this.handleGatewayRestartControl(control);
+      });
 
       let stopSessionActivityMonitor = () => {};
       let stopHeartbeat = () => {};
@@ -181,6 +199,7 @@ export class ConnectorRuntime {
           unsubscribeForwarding();
           unsubscribeFileForwarding();
           unsubscribeHostUnbind();
+          unsubscribeGatewayRestart();
           stopSessionActivityMonitor();
           stopHeartbeat();
           stopGatewayWatchdog();
@@ -218,6 +237,46 @@ export class ConnectorRuntime {
       stopGatewayWatchdog();
       throw error;
     }
+  }
+
+  private async handleGatewayRestartControl(control: GatewayRestartControl): Promise<void> {
+    const reasonSuffix = control.reason ? ` reason=${control.reason}` : "";
+    console.log(
+      `[connector] Relay requested local gateway restart for host ${control.hostId} at ${control.requestedAt}.${reasonSuffix}`
+    );
+
+    try {
+      const execution = await this.gatewayCommandRunner.restart();
+      const summary = this.describeGatewayCommandExecution(execution);
+      if (execution.exitCode === 0 && execution.signal === null) {
+        console.log(`[connector] Local gateway restart succeeded: ${summary}`);
+        return;
+      }
+      console.error(`[connector] Local gateway restart failed: ${summary}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[connector] Local gateway restart failed: command threw ${message}`);
+    }
+  }
+
+  private describeGatewayCommandExecution(execution: GatewayCommandExecution): string {
+    const parts = [
+      `command=${execution.command}`,
+      `exitCode=${execution.exitCode === null ? "null" : execution.exitCode}`,
+      `signal=${execution.signal ?? "none"}`
+    ];
+
+    const stdout = execution.stdout.trim();
+    if (stdout) {
+      parts.push(`stdout=${JSON.stringify(stdout)}`);
+    }
+
+    const stderr = execution.stderr.trim();
+    if (stderr) {
+      parts.push(`stderr=${JSON.stringify(stderr)}`);
+    }
+
+    return parts.join(", ");
   }
 
   private listTodoBoundaries(): string[] {

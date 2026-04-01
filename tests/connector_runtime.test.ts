@@ -19,9 +19,12 @@ import {
   createMockForwardedFileRequest,
   createMockHostUnbindControl,
   createMockForwardedRequest,
+  createMockGatewayRestartControl,
+  createMockHostUnbindControl,
   MockBackendTransport
 } from "../src/mock_backend_transport.js";
 import type { GatewayProbeResult } from "../src/gateway_detector.js";
+import type { GatewayCommandRunner } from "../src/gateway_watchdog.js";
 import type { HeartbeatStartOptions } from "../src/heartbeat_manager.js";
 import type { OpenClawAgentActivity, SessionActivityMonitor } from "../src/openclaw_session_activity_monitor.js";
 

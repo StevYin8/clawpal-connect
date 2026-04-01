@@ -54,6 +54,14 @@ export function createMockHostUnbindControl(input) {
         requestedAt: input.requestedAt ?? new Date().toISOString()
     };
 }
+export function createMockGatewayRestartControl(input) {
+    return {
+        hostId: input.hostId,
+        ...(input.userId ? { userId: input.userId } : {}),
+        ...(input.reason ? { reason: input.reason } : {}),
+        requestedAt: input.requestedAt ?? new Date().toISOString()
+    };
+}
 export class MockBackendTransport {
     name = "mock";
     forwardedRequestHandler = async () => {
@@ -63,6 +71,9 @@ export class MockBackendTransport {
         return;
     };
     hostUnbindHandler = async () => {
+        return;
+    };
+    gatewayRestartHandler = async () => {
         return;
     };
     connected = false;
@@ -77,6 +88,9 @@ export class MockBackendTransport {
     }
     onHostUnbind(handler) {
         this.hostUnbindHandler = handler;
+    }
+    onGatewayRestart(handler) {
+        this.gatewayRestartHandler = handler;
     }
     async connect(context) {
         this.context = context;
@@ -124,6 +138,12 @@ export class MockBackendTransport {
             throw new Error("Mock backend transport is not connected.");
         }
         await this.hostUnbindHandler(control);
+    }
+    async forwardGatewayRestart(control) {
+        if (!this.connected) {
+            throw new Error("Mock backend transport is not connected.");
+        }
+        await this.gatewayRestartHandler(control);
     }
     waitForEvent(predicate, timeoutMs = 3_000) {
         const matched = this.sentEvents.find(predicate);

@@ -19,6 +19,7 @@ export class BackendClient {
     chatRequestListeners = new Set();
     fileRequestListeners = new Set();
     hostUnbindListeners = new Set();
+    gatewayRestartListeners = new Set();
     connected = false;
     constructor(options) {
         this.transport = options.transport;
@@ -41,6 +42,11 @@ export class BackendClient {
         });
         this.transport.onHostUnbind((control) => {
             void this.dispatchHostUnbind(control).catch((error) => {
+                this.onUnhandledRequestError(error);
+            });
+        });
+        this.transport.onGatewayRestart((control) => {
+            void this.dispatchGatewayRestart(control).catch((error) => {
                 this.onUnhandledRequestError(error);
             });
         });
@@ -70,6 +76,12 @@ export class BackendClient {
         this.hostUnbindListeners.add(listener);
         return () => {
             this.hostUnbindListeners.delete(listener);
+        };
+    }
+    onGatewayRestart(listener) {
+        this.gatewayRestartListeners.add(listener);
+        return () => {
+            this.gatewayRestartListeners.delete(listener);
         };
     }
     async connect(context) {
@@ -108,6 +120,11 @@ export class BackendClient {
     }
     async dispatchHostUnbind(control) {
         for (const listener of this.hostUnbindListeners) {
+            await listener(control);
+        }
+    }
+    async dispatchGatewayRestart(control) {
+        for (const listener of this.gatewayRestartListeners) {
             await listener(control);
         }
     }

@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { OpenClawGatewayCommandRunner, describeAmbiguousRuntimeExecution } from "./gateway_watchdog.js";
+import { OpenClawDevicePairingCommandRunner, OpenClawGatewayCommandRunner, describeAmbiguousRuntimeExecution } from "./gateway_watchdog.js";
 const AGENT_FILES_OPERATIONS = [
     "agents.files.list",
     "agents.files.get",
@@ -12,6 +12,12 @@ const HOST_UNBIND_MESSAGE_TYPES = new Set([
     "relay.control.host_unbind"
 ]);
 const HOST_UNBIND_CONTROL_TYPES = new Set(["host_unbind", "host.unbind"]);
+const GATEWAY_RESTART_MESSAGE_TYPES = new Set([
+    "relay.gateway_restart",
+    "relay.gateway.restart",
+    "relay.control.gateway_restart"
+]);
+const GATEWAY_RESTART_CONTROL_TYPES = new Set(["gateway_restart", "gateway.restart"]);
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
@@ -92,6 +98,7 @@ export class WsBackendTransport {
     name = "ws";
     gatewayDetector;
     gatewayCommandRunner;
+    pairingCommandRunner;
     connectTimeoutMs;
     reconnectDelayMs;
     maxReconnectDelayMs;
@@ -108,6 +115,7 @@ export class WsBackendTransport {
     forwardedRequestHandler = async () => { };
     forwardedFileRequestHandler = async () => { };
     hostUnbindHandler = async () => { };
+    gatewayRestartHandler = async () => { };
     sentEvents = [];
     waiters = [];
     recoveryPhase = "idle";
@@ -136,6 +144,7 @@ export class WsBackendTransport {
         this.gatewayDetector = options.gatewayDetector;
         this.gatewayCommandRunner =
             options.gatewayCommandRunner ?? (this.gatewayDetector ? new OpenClawGatewayCommandRunner() : undefined);
+        this.pairingCommandRunner = options.pairingCommandRunner ?? new OpenClawDevicePairingCommandRunner();
         this.connectTimeoutMs = normalizePositiveInt(options.connectTimeoutMs, DEFAULT_CONNECT_TIMEOUT_MS);
         this.reconnectDelayMs = normalizePositiveInt(options.reconnectDelayMs, DEFAULT_RECONNECT_DELAY_MS);
         this.maxReconnectDelayMs = normalizePositiveInt(options.maxReconnectDelayMs, DEFAULT_MAX_RECONNECT_DELAY_MS);
@@ -155,6 +164,9 @@ export class WsBackendTransport {
     }
     onHostUnbind(handler) {
         this.hostUnbindHandler = handler;
+    }
+    onGatewayRestart(handler) {
+        this.gatewayRestartHandler = handler;
     }
     async connect(context) {
         this.context = context;
@@ -256,19 +268,6 @@ export class WsBackendTransport {
             console.log("[ws] No context for reconnect");
             return;
         }
-        if (this.recoveryStatus === "manual_attention" || this.recoveryPhase === "manual_attention") {
-            console.log("[ws] Reconnect suppressed: transport is in manual_attention state.");
-            return;
-        }
-        if (this.lastFailureDetail && isPairingRequiredError(this.lastFailureDetail)) {
-            this.recoveryPhase = "manual_attention";
-            this.recoveryStatus = "manual_attention";
-            this.recoveryDetail =
-                "Detected node-host pairing/role-upgrade requirement against the local OpenClaw gateway. " +
-                    "Automatic reconnect is blocked; fix the local runtime topology or manually pair node-host if intentional.";
-            console.log("[ws] Reconnect suppressed: pairing/role-upgrade requires manual attention.");
-            return;
-        }
         if (this.reconnecting || this.reconnectTimer) {
             return;
         }
@@ -334,15 +333,6 @@ export class WsBackendTransport {
         this.consecutiveConnectFailures += 1;
         this.lastConnectFailureAt = this.now().toISOString();
         this.lastFailureDetail = normalizedDetail;
-        if (isPairingRequiredError(normalizedDetail)) {
-            this.recoveryPhase = "manual_attention";
-            this.recoveryStatus = "manual_attention";
-            this.recoveryDetail =
-                `Detected node-host pairing/role-upgrade requirement: ${normalizedDetail}. ` +
-                    "Automatic reconnect is blocked; if this machine is your primary OpenClaw gateway host, keep only gateway service. " +
-                    "If node-host is intentional, complete pairing manually before retrying.";
-            return;
-        }
         if (this.consecutiveConnectFailures < this.recoveryConsecutiveFailureThreshold) {
             this.recoveryPhase = "reconnecting";
             this.recoveryStatus = "degraded";
@@ -388,21 +378,73 @@ export class WsBackendTransport {
         let gatewayProbe;
         let restartExecution;
         let restartError;
+        let approvalExecution;
+        let approvalError;
         let classification = "diagnostic_error";
         let ok = false;
         let detail = "";
         try {
             if (isPairingRequiredError(lastConnectError)) {
-                classification = "pairing_required_unresolved";
-                detail =
-                    `Detected node-host pairing/role-upgrade requirement from transport error: ${lastConnectError}. ` +
-                        "Automatic recovery is blocked. If this machine is the primary OpenClaw gateway host, do not run node-host recovery here. " +
-                        "If node-host is intentional, complete device pairing manually before reconnecting.";
-                this.consecutiveGatewayRecoveryFailures += 1;
-                this.lastRecoveryFailureAt = this.now().toISOString();
-                this.recoveryPhase = "manual_attention";
-                this.recoveryStatus = "manual_attention";
-                this.recoveryDetail = detail;
+                this.recoveryPhase = "waiting_for_pairing";
+                this.recoveryStatus = "pairing_required";
+                this.recoveryDetail =
+                    `Detected pairing/role-upgrade requirement from transport error: ${lastConnectError}. ` +
+                        "Attempting local node-host approval.";
+                if (!this.pairingCommandRunner) {
+                    classification = "pairing_required_unresolved";
+                    detail = "Pairing approval runner is not configured.";
+                }
+                else {
+                    try {
+                        approvalExecution = await this.pairingCommandRunner.approveLocalNodeUpgrade();
+                    }
+                    catch (error) {
+                        approvalError = toErrorMessage(error);
+                    }
+                    if (approvalError) {
+                        classification = "pairing_required_unresolved";
+                        detail = approvalError;
+                    }
+                    else if (!approvalExecution) {
+                        classification = "pairing_required_unresolved";
+                        detail =
+                            "Detected pairing required, but no matching local node-host pending request was found for auto-approval.";
+                    }
+                    else if (approvalExecution.exitCode !== 0) {
+                        classification = "pairing_required_unresolved";
+                        const signalInfo = approvalExecution.signal ? `, signal=${approvalExecution.signal}` : "";
+                        const stderr = approvalExecution.stderr.trim();
+                        detail = `${approvalExecution.command} exited with code ${String(approvalExecution.exitCode)}${signalInfo}${stderr ? `, stderr=${stderr}` : ""}`;
+                    }
+                    else {
+                        classification = "pairing_required_approved";
+                        ok = true;
+                        detail = `${approvalExecution.command} succeeded. Continuing websocket reconnect.`;
+                    }
+                }
+                if (ok) {
+                    this.consecutiveGatewayRecoveryFailures = 0;
+                    this.lastRecoverySuccessAt = this.now().toISOString();
+                    this.recoveryPhase = "reconnecting";
+                    this.recoveryStatus = "degraded";
+                    this.recoveryDetail = detail;
+                }
+                else {
+                    this.consecutiveGatewayRecoveryFailures += 1;
+                    this.lastRecoveryFailureAt = this.now().toISOString();
+                    if (this.consecutiveGatewayRecoveryFailures >= this.maxGatewayRecoveryAttempts) {
+                        this.recoveryPhase = "manual_attention";
+                        this.recoveryStatus = "manual_attention";
+                        this.recoveryDetail =
+                            `${detail} Reached ${this.consecutiveGatewayRecoveryFailures}/` +
+                                `${this.maxGatewayRecoveryAttempts} failed pairing recoveries.`;
+                    }
+                    else {
+                        this.recoveryPhase = "waiting_for_pairing";
+                        this.recoveryStatus = "pairing_required";
+                        this.recoveryDetail = `${detail} Continuing websocket reconnect attempts.`;
+                    }
+                }
             }
             else if (!this.gatewayDetector) {
                 detail = "Gateway detector is not configured for transport diagnostics.";
@@ -549,6 +591,16 @@ export class WsBackendTransport {
                     }
                     : {}),
                 ...(restartError ? { restartError } : {}),
+                ...(approvalExecution
+                    ? {
+                        approvalCommand: approvalExecution.command,
+                        approvalExitCode: approvalExecution.exitCode,
+                        approvalSignal: approvalExecution.signal,
+                        approvalStdout: approvalExecution.stdout,
+                        approvalStderr: approvalExecution.stderr
+                    }
+                    : {}),
+                ...(approvalError ? { approvalError } : {})
             });
             this.recoveryInProgress = false;
         }
@@ -602,6 +654,11 @@ export class WsBackendTransport {
                 const hostUnbindControl = this.parseHostUnbindControl(type, payload);
                 if (hostUnbindControl) {
                     this.hostUnbindHandler(hostUnbindControl);
+                    break;
+                }
+                const gatewayRestartControl = this.parseGatewayRestartControl(type, payload);
+                if (gatewayRestartControl) {
+                    this.gatewayRestartHandler(gatewayRestartControl);
                     break;
                 }
                 console.log(`[ws] Unknown message type: ${type}`);
@@ -672,6 +729,31 @@ export class WsBackendTransport {
         const controlType = readOptionalString(payload.controlType) ?? readOptionalString(controlEnvelope.type);
         const matchesType = HOST_UNBIND_MESSAGE_TYPES.has(type);
         const matchesControlType = type === "relay.control" && controlType !== undefined && HOST_UNBIND_CONTROL_TYPES.has(controlType);
+        if (!matchesType && !matchesControlType) {
+            return undefined;
+        }
+        const hostId = readOptionalString(controlEnvelope.hostId) ?? readOptionalString(payload.hostId);
+        if (!hostId) {
+            return undefined;
+        }
+        const userId = readOptionalString(controlEnvelope.userId) ?? readOptionalString(payload.userId);
+        const reason = readOptionalString(controlEnvelope.reason) ?? readOptionalString(payload.reason);
+        const requestedAt = readOptionalString(controlEnvelope.requestedAt) ??
+            readOptionalString(controlEnvelope.createdAt) ??
+            readOptionalString(payload.at) ??
+            new Date().toISOString();
+        return {
+            hostId,
+            ...(userId ? { userId } : {}),
+            ...(reason ? { reason } : {}),
+            requestedAt
+        };
+    }
+    parseGatewayRestartControl(type, payload) {
+        const controlEnvelope = asRecord(payload.control) ?? asRecord(payload.payload) ?? {};
+        const controlType = readOptionalString(payload.controlType) ?? readOptionalString(controlEnvelope.type);
+        const matchesType = GATEWAY_RESTART_MESSAGE_TYPES.has(type);
+        const matchesControlType = type === "relay.control" && controlType !== undefined && GATEWAY_RESTART_CONTROL_TYPES.has(controlType);
         if (!matchesType && !matchesControlType) {
             return undefined;
         }

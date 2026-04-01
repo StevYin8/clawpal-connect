@@ -1,4 +1,4 @@
-import type { AgentFilesGetRequestPayload, AgentFilesListRequestPayload, AgentFilesSetRequestPayload, BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequest, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, HostUnbindControl, HostUnbindHandler } from "./backend_client.js";
+import type { AgentFilesGetRequestPayload, AgentFilesListRequestPayload, AgentFilesSetRequestPayload, BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequest, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, GatewayRestartControl, GatewayRestartHandler, HostUnbindControl, HostUnbindHandler } from "./backend_client.js";
 export declare function createMockForwardedRequest(input: {
     hostId: string;
     userId: string;
@@ -37,11 +37,18 @@ export declare function createMockHostUnbindControl(input: {
     reason?: string;
     requestedAt?: string;
 }): HostUnbindControl;
+export declare function createMockGatewayRestartControl(input: {
+    hostId: string;
+    userId?: string;
+    reason?: string;
+    requestedAt?: string;
+}): GatewayRestartControl;
 export declare class MockBackendTransport implements BackendTransport {
     readonly name = "mock";
     private forwardedRequestHandler;
     private forwardedFileRequestHandler;
     private hostUnbindHandler;
+    private gatewayRestartHandler;
     private connected;
     private context;
     private readonly sentEvents;
@@ -49,6 +56,7 @@ export declare class MockBackendTransport implements BackendTransport {
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
     onHostUnbind(handler: HostUnbindHandler): void;
+    onGatewayRestart(handler: GatewayRestartHandler): void;
     connect(context: BackendConnectionContext): Promise<void>;
     disconnect(): Promise<void>;
     sendEvent(event: ConnectorEvent): Promise<void>;
@@ -58,6 +66,7 @@ export declare class MockBackendTransport implements BackendTransport {
     forwardRequest(request: ForwardedRequest): Promise<void>;
     forwardFileRequest(request: ForwardedFileRequest): Promise<void>;
     forwardHostUnbind(control: HostUnbindControl): Promise<void>;
+    forwardGatewayRestart(control: GatewayRestartControl): Promise<void>;
     waitForEvent(predicate: (event: ConnectorEvent) => boolean, timeoutMs?: number): Promise<ConnectorEvent>;
     private resolveWaiters;
     private removeWaiter;

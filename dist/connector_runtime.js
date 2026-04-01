@@ -1,4 +1,4 @@
-import { GatewayWatchdog } from "./gateway_watchdog.js";
+import { GatewayWatchdog, OpenClawGatewayCommandRunner } from "./gateway_watchdog.js";
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { OpenClawAgentFileBridgeService, OpenClawAgentFileRevisionConflictError } from "./openclaw_agent_file_bridge.js";
 import { OpenClawSessionActivityMonitor } from "./openclaw_session_activity_monitor.js";
@@ -12,6 +12,7 @@ export class ConnectorRuntime {
     fileBridgeService;
     heartbeatManager;
     gatewayWatchdog;
+    gatewayCommandRunner;
     syncedAgentIdProvider;
     sessionActivityMonitorFactory;
     now;
@@ -33,6 +34,7 @@ export class ConnectorRuntime {
         this.gatewayWatchdog = options.gatewayWatchdog ?? new GatewayWatchdog({
             gatewayDetector: this.gatewayDetector
         });
+        this.gatewayCommandRunner = options.gatewayCommandRunner ?? new OpenClawGatewayCommandRunner();
     }
     async createStatusSnapshot() {
         const [gateway, registry, activeHost] = await Promise.all([
@@ -97,6 +99,12 @@ export class ConnectorRuntime {
                 console.log(`[connector] Host ${activeHost.hostId} was unbound remotely at ${control.requestedAt}.${reasonSuffix}`);
                 await stopRuntime("connector.remote_host_unbound");
             });
+            const unsubscribeGatewayRestart = this.backendClient.onGatewayRestart(async (control) => {
+                if (control.hostId !== activeHost.hostId) {
+                    return;
+                }
+                await this.handleGatewayRestartControl(control);
+            });
             let stopSessionActivityMonitor = () => { };
             let stopHeartbeat = () => { };
             let stopped = false;
@@ -111,6 +119,7 @@ export class ConnectorRuntime {
                     unsubscribeForwarding();
                     unsubscribeFileForwarding();
                     unsubscribeHostUnbind();
+                    unsubscribeGatewayRestart();
                     stopSessionActivityMonitor();
                     stopHeartbeat();
                     stopGatewayWatchdog();
@@ -146,6 +155,39 @@ export class ConnectorRuntime {
             stopGatewayWatchdog();
             throw error;
         }
+    }
+    async handleGatewayRestartControl(control) {
+        const reasonSuffix = control.reason ? ` reason=${control.reason}` : "";
+        console.log(`[connector] Relay requested local gateway restart for host ${control.hostId} at ${control.requestedAt}.${reasonSuffix}`);
+        try {
+            const execution = await this.gatewayCommandRunner.restart();
+            const summary = this.describeGatewayCommandExecution(execution);
+            if (execution.exitCode === 0 && execution.signal === null) {
+                console.log(`[connector] Local gateway restart succeeded: ${summary}`);
+                return;
+            }
+            console.error(`[connector] Local gateway restart failed: ${summary}`);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[connector] Local gateway restart failed: command threw ${message}`);
+        }
+    }
+    describeGatewayCommandExecution(execution) {
+        const parts = [
+            `command=${execution.command}`,
+            `exitCode=${execution.exitCode === null ? "null" : execution.exitCode}`,
+            `signal=${execution.signal ?? "none"}`
+        ];
+        const stdout = execution.stdout.trim();
+        if (stdout) {
+            parts.push(`stdout=${JSON.stringify(stdout)}`);
+        }
+        const stderr = execution.stderr.trim();
+        if (stderr) {
+            parts.push(`stderr=${JSON.stringify(stderr)}`);
+        }
+        return parts.join(", ");
     }
     listTodoBoundaries() {
         return [
