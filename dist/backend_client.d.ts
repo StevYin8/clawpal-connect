@@ -47,6 +47,18 @@ export interface ForwardedFileSetRequest extends ForwardedFileRequestBase {
     payload: AgentFilesSetRequestPayload;
 }
 export type ForwardedFileRequest = ForwardedFileListRequest | ForwardedFileGetRequest | ForwardedFileSetRequest;
+export interface HostUnbindControl {
+    hostId: string;
+    userId?: string;
+    reason?: string;
+    requestedAt: string;
+}
+export interface GatewayRestartControl {
+    hostId: string;
+    userId?: string;
+    reason?: string;
+    requestedAt: string;
+}
 export interface HostStatusEvent {
     type: "host.status";
     hostId: string;
@@ -130,6 +142,8 @@ export type ConnectorEvent = HostStatusEvent | MessageStartEvent | MessageDeltaE
 export type ConnectorEventInput = Omit<HostStatusEvent, "at"> | Omit<MessageStartEvent, "at"> | Omit<MessageDeltaEvent, "at"> | Omit<MessageDoneEvent, "at"> | Omit<MessageErrorEvent, "at"> | Omit<AgentRuntimeStatusEvent, "at"> | Omit<AgentFilesResponseOkEvent, "at"> | Omit<AgentFilesResponseErrEvent, "at">;
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
+export type HostUnbindHandler = (control: HostUnbindControl) => Promise<void> | void;
+export type GatewayRestartHandler = (control: GatewayRestartControl) => Promise<void> | void;
 export type TransportRecoveryPhase = "unsupported" | "idle" | "reconnecting" | "diagnosing" | "recovering_gateway" | "waiting_for_pairing" | "relay_unreachable" | "manual_attention";
 export type TransportRecoveryStatus = "unsupported" | "healthy" | "degraded" | "recovering" | "pairing_required" | "relay_unreachable" | "manual_attention";
 export type TransportRecoveryAttemptClassification = "relay_unreachable" | "gateway_unhealthy_recovered" | "gateway_unhealthy_unresolved" | "pairing_required_approved" | "pairing_required_unresolved" | "diagnostic_error";
@@ -191,6 +205,8 @@ export interface BackendTransport {
     disconnect(reason?: string): Promise<void>;
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
+    onHostUnbind(handler: HostUnbindHandler): void;
+    onGatewayRestart(handler: GatewayRestartHandler): void;
     sendEvent(event: ConnectorEvent): Promise<void>;
     getRecoverySnapshot?(): TransportRecoverySnapshot;
 }
@@ -205,6 +221,8 @@ export declare class BackendClient {
     private readonly onUnhandledRequestError;
     private readonly chatRequestListeners;
     private readonly fileRequestListeners;
+    private readonly hostUnbindListeners;
+    private readonly gatewayRestartListeners;
     private connected;
     constructor(options: BackendClientOptions);
     getTransportName(): string;
@@ -212,10 +230,14 @@ export declare class BackendClient {
     getTransportRecoverySnapshot(): TransportRecoverySnapshot;
     onForwardedRequest(listener: ForwardedRequestHandler): () => void;
     onForwardedFileRequest(listener: ForwardedFileRequestHandler): () => void;
+    onHostUnbind(listener: HostUnbindHandler): () => void;
+    onGatewayRestart(listener: GatewayRestartHandler): () => void;
     connect(context: BackendConnectionContext): Promise<void>;
     disconnect(reason?: string): Promise<void>;
     sendEvent(event: ConnectorEventInput): Promise<void>;
     private dispatchForwardedRequest;
     private dispatchForwardedFileRequest;
+    private dispatchHostUnbind;
+    private dispatchGatewayRestart;
 }
 export {};

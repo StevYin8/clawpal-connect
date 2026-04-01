@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import type { ForwardedFileRequest } from "../src/backend_client.js";
+import type { ForwardedFileRequest, GatewayRestartControl, HostUnbindControl } from "../src/backend_client.js";
 import type { GatewayCommandRunner, PairingCommandRunner } from "../src/gateway_watchdog.js";
 import { WsBackendTransport, resolveRelayWsBaseUrl } from "../src/ws_backend_transport.js";
 
@@ -71,6 +71,58 @@ describe("resolveRelayWsBaseUrl", () => {
     });
 
     expect(callCount).toBe(0);
+  });
+
+  test("dispatches relay host unbind controls", () => {
+    const transport = new WsBackendTransport();
+    let received: HostUnbindControl | undefined;
+    transport.onHostUnbind((control) => {
+      received = control;
+    });
+
+    (transport as unknown as { handleRelayMessage: (payload: Record<string, unknown>) => void }).handleRelayMessage({
+      type: "relay.control",
+      controlType: "host_unbind",
+      control: {
+        hostId: "host-1",
+        userId: "user-1",
+        reason: "host_deleted",
+        requestedAt: "2026-03-31T08:00:00.000Z"
+      }
+    });
+
+    expect(received).toEqual({
+      hostId: "host-1",
+      userId: "user-1",
+      reason: "host_deleted",
+      requestedAt: "2026-03-31T08:00:00.000Z"
+    });
+  });
+
+  test("dispatches relay gateway restart controls", () => {
+    const transport = new WsBackendTransport();
+    let received: GatewayRestartControl | undefined;
+    transport.onGatewayRestart((control) => {
+      received = control;
+    });
+
+    (transport as unknown as { handleRelayMessage: (payload: Record<string, unknown>) => void }).handleRelayMessage({
+      type: "relay.control",
+      controlType: "gateway_restart",
+      control: {
+        hostId: "host-1",
+        userId: "user-1",
+        reason: "relay_recovery",
+        requestedAt: "2026-03-31T08:05:00.000Z"
+      }
+    });
+
+    expect(received).toEqual({
+      hostId: "host-1",
+      userId: "user-1",
+      reason: "relay_recovery",
+      requestedAt: "2026-03-31T08:05:00.000Z"
+    });
   });
 
   test("moves to manual attention when gateway ownership is ambiguous", async () => {

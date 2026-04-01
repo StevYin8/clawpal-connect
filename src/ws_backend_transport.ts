@@ -11,7 +11,11 @@ import type {
   ForwardedFileRequestHandler,
   ForwardedRequest,
   ForwardedRequestHandler,
+  GatewayRestartControl,
+  GatewayRestartHandler,
   HostConnectionStatus,
+  HostUnbindControl,
+  HostUnbindHandler,
   TransportRecoveryAttemptRecord,
   TransportRecoveryGatewayProbe,
   TransportRecoverySnapshot
@@ -58,6 +62,18 @@ const AGENT_FILES_OPERATIONS: readonly AgentFilesOperation[] = [
   "agents.files.get",
   "agents.files.set"
 ];
+const HOST_UNBIND_MESSAGE_TYPES = new Set([
+  "relay.host_unbind",
+  "relay.host.unbind",
+  "relay.control.host_unbind"
+]);
+const HOST_UNBIND_CONTROL_TYPES = new Set(["host_unbind", "host.unbind"]);
+const GATEWAY_RESTART_MESSAGE_TYPES = new Set([
+  "relay.gateway_restart",
+  "relay.gateway.restart",
+  "relay.control.gateway_restart"
+]);
+const GATEWAY_RESTART_CONTROL_TYPES = new Set(["gateway_restart", "gateway.restart"]);
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
@@ -171,6 +187,8 @@ export class WsBackendTransport implements BackendTransport {
   private connected = false;
   private forwardedRequestHandler: ForwardedRequestHandler = async () => {};
   private forwardedFileRequestHandler: ForwardedFileRequestHandler = async () => {};
+  private hostUnbindHandler: HostUnbindHandler = async () => {};
+  private gatewayRestartHandler: GatewayRestartHandler = async () => {};
   private readonly sentEvents: ConnectorEvent[] = [];
   private readonly waiters: EventWaiter[] = [];
   private recoveryPhase: TransportRecoverySnapshot["phase"] = "idle";
@@ -225,6 +243,14 @@ export class WsBackendTransport implements BackendTransport {
 
   onForwardedFileRequest(handler: ForwardedFileRequestHandler): void {
     this.forwardedFileRequestHandler = handler;
+  }
+
+  onHostUnbind(handler: HostUnbindHandler): void {
+    this.hostUnbindHandler = handler;
+  }
+
+  onGatewayRestart(handler: GatewayRestartHandler): void {
+    this.gatewayRestartHandler = handler;
   }
 
   async connect(context: BackendConnectionContext): Promise<void> {
@@ -716,8 +742,19 @@ export class WsBackendTransport implements BackendTransport {
         break;
       }
 
-      default:
+      default: {
+        const hostUnbindControl = this.parseHostUnbindControl(type, payload);
+        if (hostUnbindControl) {
+          this.hostUnbindHandler(hostUnbindControl);
+          break;
+        }
+        const gatewayRestartControl = this.parseGatewayRestartControl(type, payload);
+        if (gatewayRestartControl) {
+          this.gatewayRestartHandler(gatewayRestartControl);
+          break;
+        }
         console.log(`[ws] Unknown message type: ${type}`);
+      }
     }
   }
 
@@ -784,6 +821,68 @@ export class WsBackendTransport implements BackendTransport {
       operation,
       payload: setPayload,
       createdAt
+    };
+  }
+
+  private parseHostUnbindControl(type: string, payload: Record<string, unknown>): HostUnbindControl | undefined {
+    const controlEnvelope = asRecord(payload.control) ?? asRecord(payload.payload) ?? {};
+    const controlType = readOptionalString(payload.controlType) ?? readOptionalString(controlEnvelope.type);
+    const matchesType = HOST_UNBIND_MESSAGE_TYPES.has(type);
+    const matchesControlType =
+      type === "relay.control" && controlType !== undefined && HOST_UNBIND_CONTROL_TYPES.has(controlType);
+    if (!matchesType && !matchesControlType) {
+      return undefined;
+    }
+
+    const hostId = readOptionalString(controlEnvelope.hostId) ?? readOptionalString(payload.hostId);
+    if (!hostId) {
+      return undefined;
+    }
+
+    const userId = readOptionalString(controlEnvelope.userId) ?? readOptionalString(payload.userId);
+    const reason = readOptionalString(controlEnvelope.reason) ?? readOptionalString(payload.reason);
+    const requestedAt =
+      readOptionalString(controlEnvelope.requestedAt) ??
+      readOptionalString(controlEnvelope.createdAt) ??
+      readOptionalString(payload.at) ??
+      new Date().toISOString();
+
+    return {
+      hostId,
+      ...(userId ? { userId } : {}),
+      ...(reason ? { reason } : {}),
+      requestedAt
+    };
+  }
+
+  private parseGatewayRestartControl(type: string, payload: Record<string, unknown>): GatewayRestartControl | undefined {
+    const controlEnvelope = asRecord(payload.control) ?? asRecord(payload.payload) ?? {};
+    const controlType = readOptionalString(payload.controlType) ?? readOptionalString(controlEnvelope.type);
+    const matchesType = GATEWAY_RESTART_MESSAGE_TYPES.has(type);
+    const matchesControlType =
+      type === "relay.control" && controlType !== undefined && GATEWAY_RESTART_CONTROL_TYPES.has(controlType);
+    if (!matchesType && !matchesControlType) {
+      return undefined;
+    }
+
+    const hostId = readOptionalString(controlEnvelope.hostId) ?? readOptionalString(payload.hostId);
+    if (!hostId) {
+      return undefined;
+    }
+
+    const userId = readOptionalString(controlEnvelope.userId) ?? readOptionalString(payload.userId);
+    const reason = readOptionalString(controlEnvelope.reason) ?? readOptionalString(payload.reason);
+    const requestedAt =
+      readOptionalString(controlEnvelope.requestedAt) ??
+      readOptionalString(controlEnvelope.createdAt) ??
+      readOptionalString(payload.at) ??
+      new Date().toISOString();
+
+    return {
+      hostId,
+      ...(userId ? { userId } : {}),
+      ...(reason ? { reason } : {}),
+      requestedAt
     };
   }
 

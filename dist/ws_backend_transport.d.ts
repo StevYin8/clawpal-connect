@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, TransportRecoverySnapshot } from "./backend_client.js";
+import type { BackendConnectionContext, BackendTransport, ConnectorEvent, ForwardedFileRequestHandler, ForwardedRequest, ForwardedRequestHandler, GatewayRestartHandler, HostUnbindHandler, TransportRecoverySnapshot } from "./backend_client.js";
 import type { GatewayProbeResult } from "./gateway_detector.js";
 import { type GatewayCommandRunner, type PairingCommandRunner } from "./gateway_watchdog.js";
 interface GatewayProbeDetector {
@@ -44,6 +44,8 @@ export declare class WsBackendTransport implements BackendTransport {
     private connected;
     private forwardedRequestHandler;
     private forwardedFileRequestHandler;
+    private hostUnbindHandler;
+    private gatewayRestartHandler;
     private readonly sentEvents;
     private readonly waiters;
     private recoveryPhase;
@@ -71,6 +73,8 @@ export declare class WsBackendTransport implements BackendTransport {
     constructor(options?: WsBackendTransportOptions);
     onForwardedRequest(handler: ForwardedRequestHandler): void;
     onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
+    onHostUnbind(handler: HostUnbindHandler): void;
+    onGatewayRestart(handler: GatewayRestartHandler): void;
     connect(context: BackendConnectionContext): Promise<void>;
     private scheduleReconnect;
     getRecoverySnapshot(): TransportRecoverySnapshot;
@@ -81,6 +85,8 @@ export declare class WsBackendTransport implements BackendTransport {
     private pushRecoveryAttempt;
     private handleRelayMessage;
     private parseForwardedFileRequest;
+    private parseHostUnbindControl;
+    private parseGatewayRestartControl;
     disconnect(reason?: string): Promise<void>;
     sendEvent(event: ConnectorEvent): Promise<void>;
     isConnected(): boolean;

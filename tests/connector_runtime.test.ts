@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import {
   BackendClient,
@@ -18,9 +18,12 @@ import {
 import {
   createMockForwardedFileRequest,
   createMockForwardedRequest,
+  createMockGatewayRestartControl,
+  createMockHostUnbindControl,
   MockBackendTransport
 } from "../src/mock_backend_transport.js";
 import type { GatewayProbeResult } from "../src/gateway_detector.js";
+import type { GatewayCommandRunner } from "../src/gateway_watchdog.js";
 import type { HeartbeatStartOptions } from "../src/heartbeat_manager.js";
 import type { OpenClawAgentActivity, SessionActivityMonitor } from "../src/openclaw_session_activity_monitor.js";
 
