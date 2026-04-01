@@ -66,6 +66,13 @@ export interface HostUnbindControl {
   requestedAt: string;
 }
 
+export interface GatewayRestartControl {
+  hostId: string;
+  userId?: string;
+  reason?: string;
+  requestedAt: string;
+}
+
 export interface HostStatusEvent {
   type: "host.status";
   hostId: string;
@@ -178,6 +185,7 @@ export type ConnectorEventInput =
 export type ForwardedRequestHandler = (request: ForwardedRequest) => Promise<void> | void;
 export type ForwardedFileRequestHandler = (request: ForwardedFileRequest) => Promise<void> | void;
 export type HostUnbindHandler = (control: HostUnbindControl) => Promise<void> | void;
+export type GatewayRestartHandler = (control: GatewayRestartControl) => Promise<void> | void;
 
 export type TransportRecoveryPhase =
   | "unsupported"
@@ -284,6 +292,7 @@ export interface BackendTransport {
   onForwardedRequest(handler: ForwardedRequestHandler): void;
   onForwardedFileRequest(handler: ForwardedFileRequestHandler): void;
   onHostUnbind(handler: HostUnbindHandler): void;
+  onGatewayRestart(handler: GatewayRestartHandler): void;
   sendEvent(event: ConnectorEvent): Promise<void>;
   getRecoverySnapshot?(): TransportRecoverySnapshot;
 }
@@ -301,6 +310,7 @@ export class BackendClient {
   private readonly chatRequestListeners = new Set<ForwardedRequestHandler>();
   private readonly fileRequestListeners = new Set<ForwardedFileRequestHandler>();
   private readonly hostUnbindListeners = new Set<HostUnbindHandler>();
+  private readonly gatewayRestartListeners = new Set<GatewayRestartHandler>();
   private connected = false;
 
   constructor(options: BackendClientOptions) {
@@ -325,6 +335,11 @@ export class BackendClient {
     });
     this.transport.onHostUnbind((control) => {
       void this.dispatchHostUnbind(control).catch((error) => {
+        this.onUnhandledRequestError(error);
+      });
+    });
+    this.transport.onGatewayRestart((control) => {
+      void this.dispatchGatewayRestart(control).catch((error) => {
         this.onUnhandledRequestError(error);
       });
     });
@@ -360,6 +375,13 @@ export class BackendClient {
     this.hostUnbindListeners.add(listener);
     return () => {
       this.hostUnbindListeners.delete(listener);
+    };
+  }
+
+  onGatewayRestart(listener: GatewayRestartHandler): () => void {
+    this.gatewayRestartListeners.add(listener);
+    return () => {
+      this.gatewayRestartListeners.delete(listener);
     };
   }
 
@@ -405,6 +427,12 @@ export class BackendClient {
 
   private async dispatchHostUnbind(control: HostUnbindControl): Promise<void> {
     for (const listener of this.hostUnbindListeners) {
+      await listener(control);
+    }
+  }
+
+  private async dispatchGatewayRestart(control: GatewayRestartControl): Promise<void> {
+    for (const listener of this.gatewayRestartListeners) {
       await listener(control);
     }
   }

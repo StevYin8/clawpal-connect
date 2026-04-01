@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 
-import type { ForwardedFileRequest, HostUnbindControl } from "../src/backend_client.js";
-import type { GatewayCommandRunner } from "../src/gateway_watchdog.js";
+import type { ForwardedFileRequest, GatewayRestartControl, HostUnbindControl } from "../src/backend_client.js";
+import type { GatewayCommandRunner, PairingCommandRunner } from "../src/gateway_watchdog.js";
 import { WsBackendTransport, resolveRelayWsBaseUrl } from "../src/ws_backend_transport.js";
 
 describe("resolveRelayWsBaseUrl", () => {
@@ -73,7 +73,7 @@ describe("resolveRelayWsBaseUrl", () => {
     expect(callCount).toBe(0);
   });
 
-  test("dispatches relay.host_unbind payloads to host-unbind handler", () => {
+  test("dispatches relay host unbind controls", () => {
     const transport = new WsBackendTransport();
     let received: HostUnbindControl | undefined;
     transport.onHostUnbind((control) => {
@@ -81,12 +81,13 @@ describe("resolveRelayWsBaseUrl", () => {
     });
 
     (transport as unknown as { handleRelayMessage: (payload: Record<string, unknown>) => void }).handleRelayMessage({
-      type: "relay.host_unbind",
+      type: "relay.control",
+      controlType: "host_unbind",
       control: {
         hostId: "host-1",
         userId: "user-1",
         reason: "host_deleted",
-        requestedAt: "2026-03-30T09:30:00.000Z"
+        requestedAt: "2026-03-31T08:00:00.000Z"
       }
     });
 
@@ -94,7 +95,33 @@ describe("resolveRelayWsBaseUrl", () => {
       hostId: "host-1",
       userId: "user-1",
       reason: "host_deleted",
-      requestedAt: "2026-03-30T09:30:00.000Z"
+      requestedAt: "2026-03-31T08:00:00.000Z"
+    });
+  });
+
+  test("dispatches relay gateway restart controls", () => {
+    const transport = new WsBackendTransport();
+    let received: GatewayRestartControl | undefined;
+    transport.onGatewayRestart((control) => {
+      received = control;
+    });
+
+    (transport as unknown as { handleRelayMessage: (payload: Record<string, unknown>) => void }).handleRelayMessage({
+      type: "relay.control",
+      controlType: "gateway_restart",
+      control: {
+        hostId: "host-1",
+        userId: "user-1",
+        reason: "relay_recovery",
+        requestedAt: "2026-03-31T08:05:00.000Z"
+      }
+    });
+
+    expect(received).toEqual({
+      hostId: "host-1",
+      userId: "user-1",
+      reason: "relay_recovery",
+      requestedAt: "2026-03-31T08:05:00.000Z"
     });
   });
 
@@ -167,35 +194,37 @@ describe("resolveRelayWsBaseUrl", () => {
     expect(snapshot.recentRecoveryAttempts[0]?.detail).toContain("Ambiguous OpenClaw runtime state detected");
   });
 
-  test("moves pairing-required failures to manual attention without auto-approval", async () => {
-    const transport = new WsBackendTransport();
+  test("auto-approves local node-host pairing upgrade before further recovery", async () => {
+    const approvals: string[] = [];
+    const pairingCommandRunner: PairingCommandRunner = {
+      async approveLocalNodeUpgrade() {
+        approvals.push("approve");
+        return {
+          command: "openclaw devices approve req-node-1 --json",
+          args: ["devices", "approve", "req-node-1", "--json"],
+          stdout: '{"ok":true}',
+          stderr: "",
+          exitCode: 0,
+          signal: null,
+          startedAt: "2026-03-26T01:00:00.000Z",
+          completedAt: "2026-03-26T01:00:01.000Z",
+          durationMs: 1000
+        };
+      }
+    };
+    const transport = new WsBackendTransport({ pairingCommandRunner });
 
     await (transport as unknown as {
       runRecoveryDiagnosis: (lastConnectError: string) => Promise<void>;
     }).runRecoveryDiagnosis("Connection closed during handshake (code=1008): pairing required");
 
     const snapshot = transport.getRecoverySnapshot();
-    expect(snapshot.status).toBe("manual_attention");
-    expect(snapshot.phase).toBe("manual_attention");
-    expect(snapshot.recentRecoveryAttempts[0]?.classification).toBe("pairing_required_unresolved");
-    expect(snapshot.recentRecoveryAttempts[0]?.detail).toContain("Automatic recovery is blocked");
-  });
-
-  test("suppresses reconnect scheduling after pairing-required failures", () => {
-    const transport = new WsBackendTransport();
-    (transport as unknown as { context: { backendUrl: string; hostId: string; userId: string } | null }).context = {
-      backendUrl: "http://120.55.96.42:3001",
-      hostId: "host-1",
-      userId: "user-1"
-    };
-    (transport as unknown as { recordConnectFailure: (detail: string) => void }).recordConnectFailure(
-      "Connection closed during handshake (code=1008): pairing required"
+    expect(approvals).toEqual(["approve"]);
+    expect(snapshot.status).toBe("degraded");
+    expect(snapshot.phase).toBe("reconnecting");
+    expect(snapshot.recentRecoveryAttempts[0]?.classification).toBe("pairing_required_approved");
+    expect(snapshot.recentRecoveryAttempts[0]?.approvalCommand).toBe(
+      "openclaw devices approve req-node-1 --json"
     );
-    (transport as unknown as { scheduleReconnect: () => void }).scheduleReconnect();
-
-    const snapshot = transport.getRecoverySnapshot();
-    expect(snapshot.status).toBe("manual_attention");
-    expect(snapshot.phase).toBe("manual_attention");
-    expect((transport as unknown as { reconnectTimer: NodeJS.Timeout | null }).reconnectTimer).toBeNull();
   });
 });
