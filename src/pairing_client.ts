@@ -66,6 +66,8 @@ export interface PairingSessionStartOptions {
   backendUrl: string;
   hostId: string;
   hostName?: string;
+  connectorToken?: string;
+  resetOwner?: boolean;
   fetchImpl?: typeof fetch;
   paths?: readonly string[];
 }
@@ -723,9 +725,16 @@ export async function startPairingSession(options: PairingSessionStartOptions): 
         body: JSON.stringify({
           hostId,
           hostName,
+          ...(options.resetOwner ? { resetOwner: true } : {}),
+          ...(options.connectorToken?.trim()
+              ? { connectorToken: options.connectorToken.trim() }
+              : {}),
           connector: {
             hostId,
-            hostName
+            hostName,
+            ...(options.connectorToken?.trim()
+                ? { connectorToken: options.connectorToken.trim() }
+                : {}),
           }
         })
       });

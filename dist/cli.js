@@ -61,6 +61,9 @@ function withPairOptions(command) {
         .option("--timeout-ms <ms>", "Gateway probe timeout stored for run", parsePositiveInt)
         .option("--heartbeat-ms <ms>", "Heartbeat interval stored for run", parsePositiveInt);
 }
+function withPairNewOptions(command) {
+    return withPairOptions(command).option("--force", "Continue fresh pairing even if deleting the previous binding fails", false);
+}
 function withRunOptions(command) {
     return withRuntimeConfigOption(withRegistryOption(command))
         .option("--backend-url <url>", "Override backend URL (also used for first-time pairing when no local binding exists)")
@@ -384,7 +387,9 @@ async function requestAndWaitForPairing(options) {
     const session = await startPairingSession({
         backendUrl: options.backendUrl,
         hostId: options.hostId,
-        hostName: options.hostName
+        hostName: options.hostName,
+        ...(options.resetOwner ? { resetOwner: true } : {}),
+        ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
     });
     console.log(`pairing code=${session.code}`);
     if (session.expiresAt) {
@@ -475,6 +480,24 @@ async function runStatusCommand(options) {
         process.exitCode = 2;
     }
 }
+async function prepareFreshPairingReset(registry, runtimeConfigStore) {
+    const activeHost = await registry.getActiveHost();
+    if (!activeHost) {
+        console.log('[pair-new] no active host binding found locally; skipping local unbind step');
+        return null;
+    }
+    console.log(`[pair-new] active host found: hostId=${activeHost.hostId} userId=${activeHost.userId} hasConnectorToken=${Boolean(activeHost.connectorToken?.trim())} connectorTokenLength=${activeHost.connectorToken?.trim().length ?? 0}`);
+    await registry.unbindHost(activeHost.hostId);
+    console.log(`[pair-new] local registry unbound: hostId=${activeHost.hostId}`);
+    await runtimeConfigStore.updateConfig({
+        gatewayUrl: DEFAULT_RUNTIME_GATEWAY_URL,
+        gatewayToken: "",
+        gatewayTimeoutMs: DEFAULT_RUNTIME_HEARTBEAT_MS,
+        heartbeatMs: DEFAULT_RUNTIME_HEARTBEAT_MS,
+        transport: "ws"
+    });
+    return activeHost;
+}
 async function runPairCommand(options) {
     const registry = buildHostRegistry(options);
     const runtimeConfigStore = buildRuntimeConfigStore(options);
@@ -485,7 +508,9 @@ async function runPairCommand(options) {
         backendUrl,
         hostId,
         hostName,
-        reason: "manual"
+        reason: "manual",
+        ...(options.resetOwner ? { resetOwner: true } : {}),
+        ...(options.connectorToken ? { connectorToken: options.connectorToken } : {}),
     });
     const { activeHost, runtimeConfig } = await persistPairingResolution({
         registry,
@@ -519,6 +544,27 @@ async function runPairCommand(options) {
         webHost: "127.0.0.1",
         webPort: 8787,
     });
+}
+async function runPairNewCommand(options) {
+    const registry = buildHostRegistry(options);
+    const runtimeConfigStore = buildRuntimeConfigStore(options);
+    const activeHost = await prepareFreshPairingReset(registry, runtimeConfigStore);
+    try {
+        await runPairCommand({
+            ...options,
+            ...(activeHost?.connectorToken ? { connectorToken: activeHost.connectorToken } : {}),
+            ...(activeHost ? { hostName: activeHost.hostName } : {}),
+            backendUrl: resolveBackendUrl(options.backendUrl),
+            resetOwner: true,
+        });
+    }
+    catch (error) {
+        if (!(options.force ?? false)) {
+            throw error;
+        }
+        console.warn(`warn=fresh pairing reset failed: ${error instanceof Error ? error.message : String(error)}`);
+        await runPairCommand(options);
+    }
 }
 async function runBindCommand(options) {
     const registry = buildHostRegistry(options);
@@ -657,8 +703,14 @@ program
 withGatewayOptions(program.command("status").description("Print gateway + host registry status")).action(async (options) => {
     await runStatusCommand(options);
 });
-withPairOptions(program.command("pair").description("Start pairing session, show code, and save binding defaults")).action(async (options) => {
+const pairCommand = withPairOptions(program.command("pair").description("Start pairing session, show code, and save binding defaults")).action(async (options) => {
     await runPairCommand(options);
+});
+withPairNewOptions(pairCommand.command("new").description("Release existing binding and start a fresh pairing session")).action(async (options) => {
+    await runPairNewCommand(options);
+});
+withPairNewOptions(program.command("pair-new").description("Alias of `clawpal pair new`")).action(async (options) => {
+    await runPairNewCommand(options);
 });
 withRunOptions(program.command("run").description("Run connector; auto-start pairing when no local binding exists")).action(async (options) => {
     await runRunCommand(options);

@@ -17,6 +17,7 @@ import {
 } from "../src/index.js";
 import {
   createMockForwardedFileRequest,
+  createMockHostUnbindControl,
   createMockForwardedRequest,
   createMockGatewayRestartControl,
   createMockHostUnbindControl,
@@ -490,6 +491,117 @@ describe("ConnectorRuntime", () => {
       }
     } finally {
       await running?.stop();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("unbinds active host and disconnects when relay sends host unbind control", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "clawpal-connector-runtime-"));
+    const registryPath = join(tempDir, "host-registry.json");
+    const registry = new HostRegistry({ filePath: registryPath });
+    await registry.bindHost({
+      hostId: "host-1",
+      userId: "user-1",
+      hostName: "Host 1",
+      backendUrl: "https://relay.example"
+    });
+
+    const transport = new MockBackendTransport();
+    const backendClient = new BackendClient({ transport });
+    const gatewayDetector = new GatewayDetector({
+      baseUrl: "http://127.0.0.1:18789",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+    });
+    const runtime = new ConnectorRuntime({
+      hostRegistry: registry,
+      gatewayDetector,
+      backendClient
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let running: Awaited<ReturnType<ConnectorRuntime["start"]>> | undefined;
+    try {
+      running = await runtime.start();
+      expect(transport.isConnected()).toBe(true);
+
+      await transport.forwardHostUnbind(
+        createMockHostUnbindControl({
+          hostId: "host-1",
+          userId: "user-1",
+          reason: "host_deleted",
+          requestedAt: "2026-03-30T10:00:00.000Z"
+        })
+      );
+
+      await waitForCondition(() => !transport.isConnected());
+
+      const state = await registry.loadState();
+      expect(state.activeHostId).toBeNull();
+      expect(state.hosts["host-1"]).toBeUndefined();
+      expect(
+        logSpy.mock.calls.some((call) => call.some((arg) => String(arg).includes("was unbound remotely")))
+      ).toBe(true);
+    } finally {
+      await running?.stop();
+      logSpy.mockRestore();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores host unbind controls for other hosts", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "clawpal-connector-runtime-"));
+    const registryPath = join(tempDir, "host-registry.json");
+    const registry = new HostRegistry({ filePath: registryPath });
+    await registry.bindHost({
+      hostId: "host-1",
+      userId: "user-1",
+      hostName: "Host 1",
+      backendUrl: "https://relay.example"
+    });
+
+    const transport = new MockBackendTransport();
+    const backendClient = new BackendClient({ transport });
+    const gatewayDetector = new GatewayDetector({
+      baseUrl: "http://127.0.0.1:18789",
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+    });
+    const runtime = new ConnectorRuntime({
+      hostRegistry: registry,
+      gatewayDetector,
+      backendClient
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let running: Awaited<ReturnType<ConnectorRuntime["start"]>> | undefined;
+    try {
+      running = await runtime.start();
+      expect(transport.isConnected()).toBe(true);
+
+      await transport.forwardHostUnbind(
+        createMockHostUnbindControl({
+          hostId: "host-other",
+          requestedAt: "2026-03-30T10:05:00.000Z"
+        })
+      );
+
+      expect(transport.isConnected()).toBe(true);
+      const state = await registry.loadState();
+      expect(state.activeHostId).toBe("host-1");
+      expect(state.hosts["host-1"]?.hostId).toBe("host-1");
+      expect(
+        logSpy.mock.calls.some((call) => call.some((arg) => String(arg).includes("was unbound remotely")))
+      ).toBe(false);
+    } finally {
+      await running?.stop();
+      logSpy.mockRestore();
       await rm(tempDir, { recursive: true, force: true });
     }
   });
