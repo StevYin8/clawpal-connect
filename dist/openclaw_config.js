@@ -97,7 +97,8 @@ export function extractAgentsFromConfig(config) {
             agentId: binding.agentId,
             name: binding.agentId, // Use agentId as name
             model: primaryModel,
-            channel: binding.match?.channel
+            channel: binding.match?.channel,
+            accountId: binding.match?.accountId,
         });
     }
     return agents;
