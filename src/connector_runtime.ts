@@ -30,6 +30,7 @@ import {
   type SessionActivityMonitor,
   type SessionActivityMonitorFactory
 } from "./openclaw_session_activity_monitor.js";
+import { probeOpenClawChannelAvailability } from "./openclaw_channel_status.js";
 import { RuntimeWorker } from "./runtime_worker.js";
 import { RuntimeStatusTracker, loadSyncedAgentIdsFromOpenClawConfig, type SyncedAgentIdProvider } from "./runtime_status_tracker.js";
 
@@ -134,6 +135,7 @@ export class ConnectorRuntime {
 
     try {
       await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
+      runtimeStatusTracker.updateChannelAvailability(await probeOpenClawChannelAvailability());
 
       await this.backendClient.connect({
         backendUrl: activeHost.backendUrl,
