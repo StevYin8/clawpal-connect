@@ -8,6 +8,11 @@ export interface AgentStatusProvider {
     progressTotal?: number;
     hasPendingConfirmation?: boolean;
     hasActiveError?: boolean;
+    providerConnected?: boolean;
+    deliveryAvailable?: boolean;
+    channelType?: string;
+    channelAccountId?: string;
+    availabilityDetail?: string;
 }
 export interface HeartbeatStartOptions {
     hostId: string;
