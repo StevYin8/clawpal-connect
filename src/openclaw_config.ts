@@ -48,6 +48,7 @@ export interface AgentInfo {
   name: string;
   model: string;
   channel?: string | undefined;
+  accountId?: string | undefined;
 }
 
 export type OpenClawAgentResolutionMode = "explicit" | "bindings-only" | "unconfigured";
@@ -172,7 +173,8 @@ export function extractAgentsFromConfig(config: OpenClawConfig): AgentInfo[] {
       agentId: binding.agentId,
       name: binding.agentId, // Use agentId as name
       model: primaryModel,
-      channel: binding.match?.channel
+      channel: binding.match?.channel,
+      accountId: binding.match?.accountId,
     });
   }
 

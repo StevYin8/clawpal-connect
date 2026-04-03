@@ -1,4 +1,5 @@
 import type { ForwardedRequest } from "./backend_client.js";
+import type { ChannelConnectionSnapshot } from "./channel_connection_snapshot.js";
 import type { AgentStatusProvider } from "./heartbeat_manager.js";
 import type { OpenClawAgentActivity } from "./openclaw_session_activity_monitor.js";
 import { extractAgentsFromConfig, readOpenClawConfig } from "./openclaw_config.js";
@@ -71,6 +72,7 @@ export class RuntimeStatusTracker {
   private readonly agentStatusProviders: AgentStatusProvider[];
   private readonly activeWorkByRequestId = new Map<string, ActiveWorkContext>();
   private readonly localSessionActivityByAgentId = new Map<string, OpenClawAgentActivity>();
+  private readonly channelSnapshotsByAgentId = new Map<string, ChannelConnectionSnapshot>();
   private nextSequence = 0;
 
   constructor(agentIds: string[]) {
@@ -95,6 +97,14 @@ export class RuntimeStatusTracker {
         continue;
       }
       this.localSessionActivityByAgentId.set(activity.agentId, activity);
+    }
+    this.syncAgentStatusProviders();
+  }
+
+  updateChannelAvailability(snapshots: Map<string, ChannelConnectionSnapshot>): void {
+    this.channelSnapshotsByAgentId.clear();
+    for (const [agentId, snapshot] of snapshots.entries()) {
+      this.channelSnapshotsByAgentId.set(agentId, snapshot);
     }
     this.syncAgentStatusProviders();
   }
@@ -129,6 +139,7 @@ export class RuntimeStatusTracker {
     if (this.activeWorkByRequestId.size === 0 && this.localSessionActivityByAgentId.size === 0) {
       for (const provider of this.agentStatusProviders) {
         this.resetProviderToIdle(provider);
+        this.applyChannelAvailability(provider);
       }
       return;
     }
@@ -149,12 +160,14 @@ export class RuntimeStatusTracker {
         delete provider.progressTotal;
         delete provider.hasPendingConfirmation;
         delete provider.hasActiveError;
+        this.applyChannelAvailability(provider);
         continue;
       }
 
       const localActivity = this.localSessionActivityByAgentId.get(provider.agentId);
       if (!localActivity) {
         this.resetProviderToIdle(provider);
+        this.applyChannelAvailability(provider);
         continue;
       }
 
@@ -165,6 +178,7 @@ export class RuntimeStatusTracker {
       delete provider.progressTotal;
       delete provider.hasPendingConfirmation;
       delete provider.hasActiveError;
+      this.applyChannelAvailability(provider);
     }
   }
 
@@ -199,6 +213,46 @@ export class RuntimeStatusTracker {
     delete provider.progressTotal;
     delete provider.hasPendingConfirmation;
     delete provider.hasActiveError;
+  }
+
+  private applyChannelAvailability(provider: AgentStatusProvider): void {
+    const snapshot = this.channelSnapshotsByAgentId.get(provider.agentId);
+    if (!snapshot) {
+      delete provider.providerConnected;
+      delete provider.deliveryAvailable;
+      delete provider.channelType;
+      delete provider.channelAccountId;
+      delete provider.availabilityDetail;
+      return;
+    }
+
+    provider.providerConnected = snapshot.providerConnected;
+    provider.deliveryAvailable = snapshot.deliveryAvailable;
+    if (snapshot.provider) {
+      provider.channelType = snapshot.provider;
+    } else {
+      delete provider.channelType;
+    }
+    if (snapshot.accountId) {
+      provider.channelAccountId = snapshot.accountId;
+    } else {
+      delete provider.channelAccountId;
+    }
+    if (snapshot.detail) {
+      provider.availabilityDetail = snapshot.detail;
+    } else {
+      delete provider.availabilityDetail;
+    }
+
+    if (snapshot.deliveryAvailable == false || snapshot.providerConnected == false) {
+      provider.displayStatus = "offline";
+      if (!provider.currentWorkSummary && snapshot.detail) {
+        provider.currentWorkSummary = snapshot.detail;
+      }
+      if (snapshot.detail) {
+        provider.availabilityDetail = snapshot.detail;
+      }
+    }
   }
 }
 

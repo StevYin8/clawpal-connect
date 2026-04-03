@@ -41,7 +41,12 @@ describe("HeartbeatManager", () => {
         agentId: "agent-1",
         displayStatus: "working",
         currentWorkTitle: "Handle request",
-        currentWorkSummary: "Summarize logs from project"
+        currentWorkSummary: "Summarize logs from project",
+        providerConnected: false,
+        deliveryAvailable: false,
+        channelType: "discord",
+        channelAccountId: "claw-swe",
+        availabilityDetail: "gateway disconnected"
       }
     ];
     const manager = new HeartbeatManager({ intervalMs: 10 });
@@ -71,5 +76,10 @@ describe("HeartbeatManager", () => {
     expect(agentEvents.length).toBeGreaterThanOrEqual(2);
     expect(agentEvents.some((event) => event.displayStatus === "working")).toBe(true);
     expect(agentEvents.some((event) => event.displayStatus === "idle")).toBe(true);
+    expect(agentEvents.some((event) => event.providerConnected === false)).toBe(true);
+    expect(agentEvents.some((event) => event.deliveryAvailable === false)).toBe(true);
+    expect(agentEvents.some((event) => event.channelType === "discord")).toBe(true);
+    expect(agentEvents.some((event) => event.channelAccountId === "claw-swe")).toBe(true);
+    expect(agentEvents.some((event) => event.availabilityDetail === "gateway disconnected")).toBe(true);
   });
 });
