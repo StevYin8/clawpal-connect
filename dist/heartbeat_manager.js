@@ -31,7 +31,12 @@ export class HeartbeatManager {
                     ...(typeof provider.progressCurrent === "number" ? { progressCurrent: provider.progressCurrent } : {}),
                     ...(typeof provider.progressTotal === "number" ? { progressTotal: provider.progressTotal } : {}),
                     ...(provider.hasPendingConfirmation ? { hasPendingConfirmation: provider.hasPendingConfirmation } : {}),
-                    ...(provider.hasActiveError ? { hasActiveError: provider.hasActiveError } : {})
+                    ...(provider.hasActiveError ? { hasActiveError: provider.hasActiveError } : {}),
+                    ...(provider.providerConnected !== undefined ? { providerConnected: provider.providerConnected } : {}),
+                    ...(provider.deliveryAvailable !== undefined ? { deliveryAvailable: provider.deliveryAvailable } : {}),
+                    ...(provider.channelType ? { channelType: provider.channelType } : {}),
+                    ...(provider.channelAccountId ? { channelAccountId: provider.channelAccountId } : {}),
+                    ...(provider.availabilityDetail ? { availabilityDetail: provider.availabilityDetail } : {})
                 });
             }
         };

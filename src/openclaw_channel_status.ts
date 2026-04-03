@@ -129,7 +129,7 @@ export async function probeOpenClawChannelAvailability(): Promise<Map<string, Ch
       deliveryAvailable,
       provider,
       ...(accountId ? { accountId } : {}),
-      ...(detailParts.isNotEmpty ? { detail: detailParts } : {}),
+      ...(detailParts.length > 0 ? { detail: detailParts } : {}),
     });
   }
 

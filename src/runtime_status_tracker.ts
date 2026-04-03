@@ -226,8 +226,17 @@ export class RuntimeStatusTracker {
       return;
     }
 
-    provider.providerConnected = snapshot.providerConnected;
-    provider.deliveryAvailable = snapshot.deliveryAvailable;
+    if (snapshot.providerConnected !== undefined) {
+      provider.providerConnected = snapshot.providerConnected;
+    } else {
+      delete provider.providerConnected;
+    }
+
+    if (snapshot.deliveryAvailable !== undefined) {
+      provider.deliveryAvailable = snapshot.deliveryAvailable;
+    } else {
+      delete provider.deliveryAvailable;
+    }
     if (snapshot.provider) {
       provider.channelType = snapshot.provider;
     } else {

@@ -2,6 +2,7 @@ import { GatewayWatchdog, OpenClawGatewayCommandRunner } from "./gateway_watchdo
 import { HeartbeatManager } from "./heartbeat_manager.js";
 import { OpenClawAgentFileBridgeService, OpenClawAgentFileRevisionConflictError } from "./openclaw_agent_file_bridge.js";
 import { OpenClawSessionActivityMonitor } from "./openclaw_session_activity_monitor.js";
+import { probeOpenClawChannelAvailability } from "./openclaw_channel_status.js";
 import { RuntimeWorker } from "./runtime_worker.js";
 import { RuntimeStatusTracker, loadSyncedAgentIdsFromOpenClawConfig } from "./runtime_status_tracker.js";
 export class ConnectorRuntime {
@@ -63,6 +64,7 @@ export class ConnectorRuntime {
         const stopGatewayWatchdog = this.gatewayWatchdog.start();
         try {
             await this.initializeSessionActivity(sessionActivityMonitor, runtimeStatusTracker);
+            runtimeStatusTracker.updateChannelAvailability(await probeOpenClawChannelAvailability());
             await this.backendClient.connect({
                 backendUrl: activeHost.backendUrl,
                 hostId: activeHost.hostId,
