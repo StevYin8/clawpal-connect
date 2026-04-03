@@ -160,6 +160,11 @@ export interface AgentRuntimeStatusEvent {
   progressTotal?: number;
   hasPendingConfirmation?: boolean;
   hasActiveError?: boolean;
+  providerConnected?: boolean;
+  deliveryAvailable?: boolean;
+  channelType?: string;
+  channelAccountId?: string;
+  availabilityDetail?: string;
   at: string;
 }
 
